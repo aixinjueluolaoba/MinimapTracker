@@ -1,0 +1,32 @@
+# CMake build directories
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Compiled binaries
+*.so
+*.dll
+*.dylib
+*.a
+*.lib
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Generated video outputs and temporary tests
+test_output.mp4
+*.mp4
+*.avi
+*.mkv
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
