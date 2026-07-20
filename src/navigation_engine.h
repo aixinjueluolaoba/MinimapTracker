@@ -12,92 +12,35 @@ extern "C" {
 #define NAV_EXPORT __attribute__((visibility("default")))
 #endif
 
-// Action constants
-constexpr int kActionWait = 0;
-constexpr int kActionStop = 1;
-constexpr int kActionStart = 2;
-constexpr int kActionUpdate = 3;
-constexpr int kActionComplete = 4;
-constexpr int kActionError = 5;
-
-// Status constants
-constexpr int kStatusNone = 0;
-constexpr int kStatusMoving = 2;
-constexpr int kStatusComplete = 3;
-constexpr int kStatusFailed = 4;
-
-NAV_EXPORT void* navigation_engine_create();
-
-NAV_EXPORT bool navigation_engine_start(void* handle,
-                                        float target_x,
-                                        float target_y,
-                                        float initial_hold_angle_deg,
-                                        int base_speed_percent,
-                                        float arrival_distance_px,
-                                        float slow_down_distance_px);
-
-NAV_EXPORT bool navigation_engine_step(void* handle,
-                                       float track_x,
-                                       float track_y,
-                                       bool track_found,
-                                       bool manual_required,
-                                       bool pointer_has_match,
-                                       float pointer_angle_deg,
-                                       bool pointer_frozen,
-                                       int64_t pointer_age_ms,
-                                       int64_t now_ms,
-                                       int* action,
-                                       int* status,
-                                       int64_t* sleep_ms,
-                                       float* hold_angle_deg,
-                                       int* speed_percent,
-                                       float* map_angle_deg,
-                                       float* current_angle_deg,
-                                       float* angle_delta_deg,
-                                       float* signed_delta_deg,
-                                       int* target_index,
-                                       float* target_x,
-                                       float* target_y,
-                                       bool* using_cached_track,
-                                       bool* jump_requested);
-
-NAV_EXPORT void navigation_engine_release(void* handle);
-
+// ==========================================
+// 1. Pointer Angle Detector API (指针角度检测)
+// ==========================================
 NAV_EXPORT bool detect_pointer_angle_c(const int32_t* pixels, int width, int height,
                                        float centerX, float centerY,
                                        bool* has_match, int* angle_deg, float* confidence);
 
-// Optimized structure-based navigation step API
-struct NavInput {
-    float track_x;
-    float track_y;
-    bool track_found;
-    bool manual_required;
-    bool pointer_has_match;
-    float pointer_angle_deg;
-    bool pointer_frozen;
-    int64_t pointer_age_ms;
-    int64_t now_ms;
-};
+// ==========================================
+// 2. Hybrid Map Player Tracker API (地图定位器: SIFT + SuperPoint)
+// ==========================================
 
-struct NavOutput {
-    int action;
-    int status;
-    int64_t sleep_ms;
-    float hold_angle_deg;
-    int speed_percent;
-    float map_angle_deg;
-    float current_angle_deg;
-    float angle_delta_deg;
-    float signed_delta_deg;
-    int target_index;
-    float target_x;
-    float target_y;
-    bool using_cached_track;
-    bool jump_requested;
-};
+NAV_EXPORT void* player_tracker_create(const char* map_path,
+                                    const char* cache_path,
+                                    const char* model_dir,
+                                    int minimap_left,
+                                    int minimap_top,
+                                    int minimap_width,
+                                    int minimap_height,
+                                    int base_search_radius,
+                                    int max_lost_frames,
+                                    double clahe_limit,
+                                    float match_ratio,
+                                    int min_match_count,
+                                    double ransac_threshold);
 
-NAV_EXPORT bool navigation_engine_step_struct(void* handle, const struct NavInput* input, struct NavOutput* output);
+NAV_EXPORT bool player_tracker_locate(void* handle, const int32_t* frame_pixels, int w, int h,
+                                    float* out_x, float* out_y, float* confidence, int* cost_ms);
+
+NAV_EXPORT void player_tracker_release(void* handle);
 
 #ifdef __cplusplus
 }
