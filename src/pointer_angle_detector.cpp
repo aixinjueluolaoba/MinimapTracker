@@ -1,241 +1,100 @@
 #include "pointer_angle_detector.h"
-
-#include <algorithm>
 #include <cmath>
-#include <cstdint>
-#include <cstring>
-#include <vector>
-#include <cstdio>
 
 #ifdef __ANDROID__
 #include <android/log.h>
-#define PTR_LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "luoke", __VA_ARGS__)
+#define DET_LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "luoke_det", __VA_ARGS__)
+#define DET_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "luoke_det", __VA_ARGS__)
 #else
-#define PTR_LOGD(...) do { printf("[pointer DEBUG] "); printf(__VA_ARGS__); printf("\n"); } while(0)
+#include <cstdio>
+#define DET_LOGD(...) do { printf("[detector DEBUG] "); printf(__VA_ARGS__); printf("\n"); } while(0)
+#define DET_LOGE(...) do { fprintf(stderr, "[detector ERROR] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
 #endif
 
-namespace {
+PointerAngleDetector::PointerAngleDetector(const std::string& model_dir) {
+    std::string param_path = model_dir + "/pointer_angle_cnn_v2_bgr_pool2.ncnn.param";
+    std::string bin_path = model_dir + "/pointer_angle_cnn_v2_bgr_pool2.ncnn.bin";
 
-constexpr int kTargetColorsRgb[][3] = {
-        {235, 189, 60},
-        {212, 144, 38}
-};
-constexpr int kTargetColorCount = 2;
-constexpr float kColorTolerance = 42.f;
-constexpr float kColorToleranceSq = kColorTolerance * kColorTolerance;
-constexpr float kMinScore = 0.16f;
-constexpr int kUpscale = 8;
-constexpr int kNeighborhoodRadius = 2;
-constexpr double kAngleOffsetDeg = 90.0;
-constexpr double kRadToDeg = 57.29577951308232;
+    DET_LOGD("Loading neural pointer param: %s", param_path.c_str());
+    DET_LOGD("Loading neural pointer model: %s", bin_path.c_str());
 
-inline float colorDistanceSq(int r, int g, int b, int tr, int tg, int tb) {
-    float dr = static_cast<float>(r - tr);
-    float dg = static_cast<float>(g - tg);
-    float db = static_cast<float>(b - tb);
-    return dr * dr + dg * dg + db * db;
+    net_.opt.use_vulkan_compute = false;
+    net_.opt.num_threads = 2;
+
+    int param_ret = net_.load_param(param_path.c_str());
+    int model_ret = net_.load_model(bin_path.c_str());
+
+    if (param_ret != 0 || model_ret != 0) {
+        DET_LOGE("Failed to load neural pointer detector model! param=%d model=%d", param_ret, model_ret);
+        loaded_ = false;
+    } else {
+        DET_LOGD("Neural pointer detector model loaded successfully.");
+        loaded_ = true;
+    }
 }
 
-inline bool keepPixel(int r, int g, int b) {
-    for (int i = 0; i < kTargetColorCount; ++i) {
-        if (colorDistanceSq(r, g, b,
-                            kTargetColorsRgb[i][0],
-                            kTargetColorsRgb[i][1],
-                            kTargetColorsRgb[i][2]) <= kColorToleranceSq) {
-            return true;
-        }
+PointerDetectResult PointerAngleDetector::detect(const cv::Mat& frame_bgr) {
+    if (!loaded_) {
+        return {false, 0.f, 0.f};
     }
-    return false;
+
+    // Safety checks for 1280x720 frame
+    // Small map ROI is MM_X=1072, MM_Y=25, MM_S=128
+    if (frame_bgr.empty() || frame_bgr.cols < 1200 || frame_bgr.rows < 153) {
+        return {false, 0.f, 0.f};
+    }
+
+    try {
+        cv::Rect mm_rect(1072, 25, 128, 128);
+        cv::Mat mm = frame_bgr(mm_rect);
+
+        // Crop 32x32 patch centered at relative (63,63)
+        // Center: (PTR_CX, PTR_CY) = (63, 63). Crop width = 32, half width = 16.
+        // Start position = (63-16, 63-16) = (47, 47)
+        cv::Rect patch_rect(47, 47, 32, 32);
+        cv::Mat patch = mm(patch_rect);
+
+        return detect_patch(patch);
+    } catch (...) {
+        return {false, 0.f, 0.f};
+    }
 }
 
-inline int matchedColorIndex(int r, int g, int b) {
-    for (int i = 0; i < kTargetColorCount; ++i) {
-        if (colorDistanceSq(r, g, b,
-                            kTargetColorsRgb[i][0],
-                            kTargetColorsRgb[i][1],
-                            kTargetColorsRgb[i][2]) <= kColorToleranceSq) {
-            return i;
+PointerDetectResult PointerAngleDetector::detect_patch(const cv::Mat& patch_bgr_32x32) {
+    if (!loaded_ || patch_bgr_32x32.empty() || patch_bgr_32x32.cols != 32 || patch_bgr_32x32.rows != 32) {
+        return {false, 0.f, 0.f};
+    }
+
+    try {
+        // Convert to NCNN Mat (3 channels, 32x32)
+        ncnn::Mat in = ncnn::Mat::from_pixels(patch_bgr_32x32.data, ncnn::Mat::PIXEL_BGR, 32, 32);
+        
+        // Normalize BGR channels by dividing 255.0
+        const float norm[3] = {1/255.f, 1/255.f, 1/255.f};
+        in.substract_mean_normalize(nullptr, norm);
+
+        ncnn::Extractor ex = net_.create_extractor();
+        ex.input("in0", in);
+
+        ncnn::Mat out;
+        int extract_ret = ex.extract("out0", out);
+        if (extract_ret != 0) {
+            return {false, 0.f, 0.f};
         }
-    }
-    return -1;
-}
 
-inline float distanceF(float x1, float y1, float x2, float y2) {
-    float dx = x2 - x1;
-    float dy = y2 - y1;
-    return std::sqrt(dx * dx + dy * dy);
-}
+        // Output: [sin, cos]
+        float s = out[0];
+        float c = out[1];
 
-} // namespace
-
-DetectResult detectPointerAngle(const int32_t* pixels, int width, int height,
-                                 float centerX, float centerY) {
-    DetectResult result;
-    int total = width * height;
-
-    // Step 1: Color filter
-    std::vector<bool> keep(total, false);
-    std::vector<int> colorIndex(total, -1);
-    int activeCount = 0;
-    for (int i = 0; i < total; ++i) {
-        int32_t argb = pixels[i];
-        int r = (argb >> 16) & 0xff;
-        int g = (argb >> 8) & 0xff;
-        int b = argb & 0xff;
-        if (keepPixel(r, g, b)) {
-            keep[i] = true;
-            colorIndex[i] = matchedColorIndex(r, g, b);
-            activeCount++;
+        // Solve angle: angle = (rad2deg(arctan2(sin, cos)) + 360) % 360
+        float angle_rad = atan2f(s, c);
+        float angle_deg = angle_rad * 180.f / 3.14159265f;
+        if (angle_deg < 0) {
+            angle_deg += 360.f;
         }
+
+        return {true, angle_deg, 1.0f};
+    } catch (...) {
+        return {false, 0.f, 0.f};
     }
-    if (activeCount < 2) {
-        return result;
-    }
-
-    // Step 2: BFS largest connected component (8-connectivity)
-    std::vector<int> labels(total, 0);
-    std::vector<int> queue(total);
-    int bestLabel = 0;
-    int bestSize = 0;
-    int label = 1;
-    for (int i = 0; i < total; ++i) {
-        if (!keep[i] || labels[i] != 0) continue;
-        int head = 0, tail = 0;
-        queue[tail++] = i;
-        labels[i] = label;
-        int size = 0;
-        while (head < tail) {
-            int idx = queue[head++];
-            size++;
-            int x = idx % width;
-            int y = idx / width;
-            for (int ny = std::max(0, y - 1); ny <= std::min(height - 1, y + 1); ++ny) {
-                for (int nx = std::max(0, x - 1); nx <= std::min(width - 1, x + 1); ++nx) {
-                    int next = ny * width + nx;
-                    if (keep[next] && labels[next] == 0) {
-                        labels[next] = label;
-                        queue[tail++] = next;
-                    }
-                }
-            }
-        }
-        if (size > bestSize) {
-            bestSize = size;
-            bestLabel = label;
-        }
-        label++;
-    }
-
-    // Build largest component mask
-    std::vector<bool> largest(total, false);
-    int largestCount = 0;
-    for (int i = 0; i < total; ++i) {
-        if (labels[i] == bestLabel) {
-            largest[i] = true;
-            largestCount++;
-        }
-    }
-    if (largestCount < 2) {
-        return result;
-    }
-
-    // Step 3: Upscale binary mask
-    int outW = width * kUpscale;
-    int outH = height * kUpscale;
-    std::vector<bool> upscaled(outW * outH, false);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            if (!largest[y * width + x]) continue;
-            for (int dy = 0; dy < kUpscale; ++dy) {
-                int row = (y * kUpscale + dy) * outW;
-                for (int dx = 0; dx < kUpscale; ++dx) {
-                    upscaled[row + x * kUpscale + dx] = true;
-                }
-            }
-        }
-    }
-
-    // Step 4: Find farthest point from center with color balance tie-breaking
-    float scaledCenterX = centerX * kUpscale;
-    float scaledCenterY = centerY * kUpscale;
-
-    // First pass: find max distance
-    float maxDistance = -1.f;
-    for (int y = 0; y < outH; ++y) {
-        for (int x = 0; x < outW; ++x) {
-            if (!upscaled[y * outW + x]) continue;
-            float d = distanceF(scaledCenterX, scaledCenterY,
-                                static_cast<float>(x), static_cast<float>(y));
-            if (d > maxDistance) maxDistance = d;
-        }
-    }
-    if (maxDistance <= 0.f) {
-        return result;
-    }
-
-    // Second pass: among candidates near max distance, pick best by color balance
-    float distanceTolerance = std::max(static_cast<float>(kUpscale), maxDistance * 0.06f);
-    float farX = -1.f, farY = -1.f, farDistance = -1.f;
-    int bestBalancedColorCount = -1;
-    int bestTotalColorCount = -1;
-
-    for (int y = 0; y < outH; ++y) {
-        for (int x = 0; x < outW; ++x) {
-            if (!upscaled[y * outW + x]) continue;
-            float candidateDistance = distanceF(scaledCenterX, scaledCenterY,
-                                               static_cast<float>(x), static_cast<float>(y));
-            if (maxDistance - candidateDistance > distanceTolerance) continue;
-
-            // Count target colors in neighborhood (in original resolution)
-            float pointX = static_cast<float>(x) / kUpscale;
-            float pointY = static_cast<float>(y) / kUpscale;
-            int cx = static_cast<int>(std::round(pointX));
-            int cy = static_cast<int>(std::round(pointY));
-            int counts[2] = {0, 0};
-            for (int ny = std::max(0, cy - kNeighborhoodRadius);
-                 ny <= std::min(height - 1, cy + kNeighborhoodRadius); ++ny) {
-                for (int nx = std::max(0, cx - kNeighborhoodRadius);
-                     nx <= std::min(width - 1, cx + kNeighborhoodRadius); ++nx) {
-                    int idx = ny * width + nx;
-                    if (largest[idx] && colorIndex[idx] >= 0) {
-                        counts[colorIndex[idx]]++;
-                    }
-                }
-            }
-            int balancedColorCount = std::min(counts[0], counts[1]);
-            int totalColorCount = counts[0] + counts[1];
-
-            if (balancedColorCount > bestBalancedColorCount
-                || (balancedColorCount == bestBalancedColorCount && totalColorCount > bestTotalColorCount)
-                || (balancedColorCount == bestBalancedColorCount
-                    && totalColorCount == bestTotalColorCount
-                    && candidateDistance > farDistance)) {
-                farDistance = candidateDistance;
-                farX = static_cast<float>(x);
-                farY = static_cast<float>(y);
-                bestBalancedColorCount = balancedColorCount;
-                bestTotalColorCount = totalColorCount;
-            }
-        }
-    }
-    if (farDistance <= 0.f) {
-        return result;
-    }
-
-    // Step 5: Compute angle
-    double dx = static_cast<double>(farX) - scaledCenterX;
-    double dy = static_cast<double>(farY) - scaledCenterY;
-    double angle = std::atan2(-dx, -dy) * kRadToDeg + kAngleOffsetDeg;
-    angle = std::fmod(angle + 360.0, 360.0);
-    int angleDeg = static_cast<int>(std::round(angle)) % 360;
-
-    // Step 6: Confidence
-    float maxRadius = std::sqrt(
-            static_cast<float>(outW * outW + outH * outH));
-    float score = farDistance / std::max(maxRadius, 1.f);
-
-    result.angle_deg = angleDeg;
-    result.confidence = score;
-    result.has_match = score >= kMinScore;
-    return result;
 }

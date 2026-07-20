@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.10)
 project(MinimapTracker)
 
-set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 1. OpenCV configuration
@@ -19,23 +19,25 @@ else()
 endif()
 
 # 2. JNI configuration (required for Android bindings)
-# Find JNI headers manually to bypass AWT requirement on host systems
-find_path(JNI_INCLUDE_DIR jni.h
-    PATHS
-    /usr/lib/jvm/java-17-openjdk-amd64/include
-    /usr/lib/jvm/default-java/include
-    /usr/lib/jvm/java-11-openjdk-amd64/include
-    /usr/lib/jvm/java-8-openjdk-amd64/include
-)
-find_path(JNI_MD_INCLUDE_DIR jni_md.h
-    PATHS
-    /usr/lib/jvm/java-17-openjdk-amd64/include/linux
-    /usr/lib/jvm/default-java/include/linux
-    /usr/lib/jvm/java-11-openjdk-amd64/include/linux
-    /usr/lib/jvm/java-8-openjdk-amd64/include/linux
-)
-if (NOT JNI_INCLUDE_DIR OR NOT JNI_MD_INCLUDE_DIR)
-    message(FATAL_ERROR "Could not find jni.h or jni_md.h. Make sure JDK is installed.")
+# Only search manually on host systems; Android NDK provides its own jni.h in sysroot.
+if (NOT ANDROID_ABI)
+    find_path(JNI_INCLUDE_DIR jni.h
+        PATHS
+        /usr/lib/jvm/java-17-openjdk-amd64/include
+        /usr/lib/jvm/default-java/include
+        /usr/lib/jvm/java-11-openjdk-amd64/include
+        /usr/lib/jvm/java-8-openjdk-amd64/include
+    )
+    find_path(JNI_MD_INCLUDE_DIR jni_md.h
+        PATHS
+        /usr/lib/jvm/java-17-openjdk-amd64/include/linux
+        /usr/lib/jvm/default-java/include/linux
+        /usr/lib/jvm/java-11-openjdk-amd64/include/linux
+        /usr/lib/jvm/java-8-openjdk-amd64/include/linux
+    )
+    if (NOT JNI_INCLUDE_DIR OR NOT JNI_MD_INCLUDE_DIR)
+        message(FATAL_ERROR "Could not find jni.h or jni_md.h. Make sure JDK is installed.")
+    endif()
 endif()
 
 # 3. NCNN configuration
@@ -56,29 +58,37 @@ set_target_properties(
 )
 
 # 4. Include directories
-include_directories(
-    src
-    ${OpenCV_INCLUDE_DIRS}
-    ${JNI_INCLUDE_DIR}
-    ${JNI_MD_INCLUDE_DIR}
-    ${NCNN_ROOT}/include/ncnn
-)
+if (ANDROID_ABI)
+    include_directories(
+        src
+        ${OpenCV_INCLUDE_DIRS}
+        ${NCNN_ROOT}/include/ncnn
+    )
+else()
+    include_directories(
+        src
+        ${OpenCV_INCLUDE_DIRS}
+        ${JNI_INCLUDE_DIR}
+        ${JNI_MD_INCLUDE_DIR}
+        ${NCNN_ROOT}/include/ncnn
+    )
+endif()
 
 # 5. Compile Shared Library
-add_library(navigation_engine SHARED
+add_library(fishing_native SHARED
     src/navigation_engine.cpp
     src/pointer_angle_detector.cpp
     src/map_sift_tracker.cpp
 )
 
 # Set compile definitions for shared library
-target_compile_definitions(navigation_engine PRIVATE NAV_EXPORTS)
+target_compile_definitions(fishing_native PRIVATE NAV_EXPORTS)
 
 # Link OpenCV, NCNN and logging/thread libraries
 if (ANDROID_ABI)
     find_library(log-lib log)
     find_library(jnigraphics-lib jnigraphics)
-    target_link_libraries(navigation_engine PRIVATE
+    target_link_libraries(fishing_native PRIVATE
         ncnn
         ${log-lib}
         ${jnigraphics-lib}
@@ -88,7 +98,7 @@ if (ANDROID_ABI)
         ${OpenCV_LIBS}
     )
 else()
-    target_link_libraries(navigation_engine PRIVATE
+    target_link_libraries(fishing_native PRIVATE
         ncnn
         pthread
         -fopenmp

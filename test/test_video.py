@@ -5,14 +5,6 @@ import ctypes
 import os
 import sys
 
-# Define ROI parameters for Minimap Pointer Angle Detector
-ROI_X = 1124
-ROI_Y = 77
-ROI_W = 23
-ROI_H = 23
-CENTER_X = 11.63
-CENTER_Y = 11.80
-
 # Minimap region in the 1280x720 frame (used by SIFT/SuperPoint hybrid tracker)
 MINIMAP_LEFT = 1100
 MINIMAP_TOP = 50
@@ -20,11 +12,12 @@ MINIMAP_WIDTH = 150
 MINIMAP_HEIGHT = 150
 
 def main():
-    video_path = "/home/diana/fishing/video_20s.mp4"
+    # Use the official user-provided test video
+    video_path = "/home/diana/screencap/file/cv_tools/record/rec_20260720_014710_032096.mp4"
     if len(sys.argv) > 1:
         video_path = sys.argv[1]
 
-    print(f"Opening video file: {video_path}")
+    print(f"Opening test video file: {video_path}")
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print("Error: Could not open video file.", file=sys.stderr)
@@ -45,19 +38,25 @@ def main():
         return -1
 
     # Load Navigation Engine SO Library
-    so_path = "/home/diana/洛克导航/navigation_engine/build/libnavigation_engine.so"
+    so_path = "/home/diana/洛克导航/navigation_engine/build/libfishing_native.so"
     if not os.path.exists(so_path):
         print(f"Error: Shared library not found at {so_path}. Please compile the project first.", file=sys.stderr)
         return -1
 
     lib = ctypes.CDLL(so_path)
 
-    # 1. Declare Pointer Angle Detector API
-    lib.detect_pointer_angle_c.restype = ctypes.c_bool
-    lib.detect_pointer_angle_c.argtypes = [
-        ctypes.POINTER(ctypes.c_int32), ctypes.c_int, ctypes.c_int, ctypes.c_float, ctypes.c_float,
-        ctypes.POINTER(ctypes.c_bool), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_float)
+    # 1. Declare Neural Pointer Detector API
+    lib.pointer_detector_create.restype = ctypes.c_void_p
+    lib.pointer_detector_create.argtypes = [ctypes.c_char_p]
+
+    lib.pointer_detector_detect.restype = ctypes.c_bool
+    lib.pointer_detector_detect.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32), ctypes.c_int, ctypes.c_int,
+        ctypes.POINTER(ctypes.c_bool), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float)
     ]
+
+    lib.pointer_detector_release.restype = None
+    lib.pointer_detector_release.argtypes = [ctypes.c_void_p]
 
     # 2. Declare Hybrid Map Tracker API (SIFT + SuperPoint)
     lib.player_tracker_create.restype = ctypes.c_void_p
@@ -76,19 +75,29 @@ def main():
     lib.player_tracker_release.restype = None
     lib.player_tracker_release.argtypes = [ctypes.c_void_p]
 
-    # 3. Define paths for initialization
+    # 3. Define paths inside the sub-repository
+    pointer_model_dir = "/home/diana/洛克导航/navigation_engine/models/pointer_model".encode('utf-8')
+    superpoint_model_dir = "/home/diana/洛克导航/navigation_engine/models/superpoint_model".encode('utf-8')
     map_path = "/home/diana/洛克导航/app/src/main/assets/maps/big_map.png".encode('utf-8')
+    
     cache_dir = "/home/diana/洛克导航/navigation_engine/build"
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, "sift_cache.bin").encode('utf-8')
-    model_dir = "/home/diana/洛克导航/app/src/main/assets/models/superpoint_superglue_ncnn".encode('utf-8')
 
+    # 4. Initialize Neural Pointer Detector
+    print("Initializing Neural CNN Pointer Detector...")
+    pointer_detector = lib.pointer_detector_create(pointer_model_dir)
+    if not pointer_detector:
+        print("Error: Failed to initialize neural pointer detector.", file=sys.stderr)
+        return -1
+    print("Pointer detector initialization successful.")
+
+    # 5. Initialize Hybrid SIFT+SuperPoint Tracker
     print("Initializing Hybrid SIFT+SuperPoint Tracker...")
-    # Initialize tracker with ROI and matching params
     tracker = lib.player_tracker_create(
         map_path,
         cache_path,
-        model_dir,
+        superpoint_model_dir,
         MINIMAP_LEFT, MINIMAP_TOP, MINIMAP_WIDTH, MINIMAP_HEIGHT,
         150,     # base_search_radius
         10,      # max_lost_frames
@@ -100,6 +109,7 @@ def main():
 
     if not tracker:
         print("Error: Failed to initialize hybrid player tracker.", file=sys.stderr)
+        lib.pointer_detector_release(pointer_detector)
         return -1
     print("Tracker initialization successful.")
 
@@ -110,37 +120,24 @@ def main():
             break
         frame_idx += 1
 
-        # ----------------- Pointer Angle Detection -----------------
-        crop_x = min(ROI_X, width - ROI_W)
-        crop_y = min(ROI_Y, height - ROI_H)
-        roi = frame[crop_y:crop_y+ROI_H, crop_x:crop_x+ROI_W]
-
-        # Convert ROI to 32-bit ARGB representation for C++ detector
-        b = roi[:, :, 0].astype(np.int32)
-        g = roi[:, :, 1].astype(np.int32)
-        r = roi[:, :, 2].astype(np.int32)
-        a = np.ones_like(b) * 255
-        argb = (a << 24) | (r << 16) | (g << 8) | b
-        pixels = argb.flatten()
-        pixels_ptr = pixels.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
-
-        ptr_matched = ctypes.c_bool(False)
-        ptr_angle = ctypes.c_int(0)
-        ptr_conf = ctypes.c_float(0.0)
-        
-        lib.detect_pointer_angle_c(
-            pixels_ptr, ROI_W, ROI_H, CENTER_X, CENTER_Y,
-            ctypes.byref(ptr_matched), ctypes.byref(ptr_angle), ctypes.byref(ptr_conf)
-        )
-
-        # ----------------- Player SIFT/SuperPoint Positioning -----------------
-        # Convert full frame to 32-bit RGBA for tracker (A=255)
+        # Convert full frame to 32-bit RGBA (A=255) for NCNN CNN and SIFT/SP trackers
         rgba_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
         rgba_data = rgba_frame.astype(np.int32)
         packed_frame = (255 << 24) | (rgba_data[:, :, 0] << 16) | (rgba_data[:, :, 1] << 8) | rgba_data[:, :, 2]
         frame_pixels_flat = packed_frame.flatten()
         frame_ptr = frame_pixels_flat.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
 
+        # ----------------- Neural Pointer Detection -----------------
+        ptr_matched = ctypes.c_bool(False)
+        ptr_angle = ctypes.c_float(0.0)
+        ptr_conf = ctypes.c_float(0.0)
+        
+        lib.pointer_detector_detect(
+            pointer_detector, frame_ptr, width, height,
+            ctypes.byref(ptr_matched), ctypes.byref(ptr_angle), ctypes.byref(ptr_conf)
+        )
+
+        # ----------------- Player SIFT/SuperPoint Positioning -----------------
         loc_x = ctypes.c_float(0.0)
         loc_y = ctypes.c_float(0.0)
         loc_conf = ctypes.c_float(0.0)
@@ -153,37 +150,39 @@ def main():
 
         # Print progress info every 10 frames
         if frame_idx % 10 == 0 or frame_idx == 1:
-            print(f"Frame {frame_idx:03d} | Pointer Match: {ptr_matched.value} Ang={ptr_angle.value}° "
+            print(f"Frame {frame_idx:03d} | CNN Pointer Match: {ptr_matched.value} Ang={ptr_angle.value:.2f}° "
                   f"| Locate Success: {loc_success} Pos=({loc_x.value:.1f}, {loc_y.value:.1f}) Cost={loc_cost.value}ms")
 
         # ----------------- Visualizations -----------------
-        # 1. Minimap and Pointer ROI Boxes
-        cv2.rectangle(frame, (crop_x, crop_y), (crop_x + ROI_W, crop_y + ROI_H), (0, 255, 0), 1)
+        # 1. Draw pointer detection source area boundary on frame: [1072, 25, 128, 128]
+        cv2.rectangle(frame, (1072, 25), (1072 + 128, 25 + 128), (0, 255, 0), 1)
+        cv2.putText(frame, "Pointer Neural ROI (128x128)", (1060, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+
+        # 2. Draw SIFT/SP search ROI boundary
         cv2.rectangle(frame, (MINIMAP_LEFT, MINIMAP_TOP), (MINIMAP_LEFT + MINIMAP_WIDTH, MINIMAP_TOP + MINIMAP_HEIGHT), (0, 165, 255), 1)
-        cv2.putText(frame, "Pointer ROI", (crop_x - 10, crop_y - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
         cv2.putText(frame, "SIFT/SP Minimap ROI", (MINIMAP_LEFT, MINIMAP_TOP - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1)
 
-        # 2. Draw HUD HUD Radar Circle
+        # 3. Draw HUD Radar Circle
         hud_cx, hud_cy, hud_r = 150, height - 150, 100
         cv2.circle(frame, (hud_cx, hud_cy), hud_r, (40, 40, 40), -1)
         cv2.circle(frame, (hud_cx, hud_cy), hud_r, (120, 120, 120), 2)
 
-        # 3. Draw compass pointer angle line
+        # 4. Draw compass pointer angle line (using standards polar axis)
         if ptr_matched.value:
             rad = ptr_angle.value * np.pi / 180.0
             px = int(hud_cx + (hud_r - 20) * np.cos(rad))
-            py = int(hud_cy - (hud_r - 20) * np.sin(rad)) # standard coordinate system offset
+            py = int(hud_cy - (hud_r - 20) * np.sin(rad)) # invert y for HUD rendering
             cv2.line(frame, (hud_cx, hud_cy), (px, py), (0, 255, 0), 3)
             cv2.circle(frame, (px, py), 5, (0, 255, 0), -1)
-            cv2.putText(frame, f"{ptr_angle.value} deg", (hud_cx - 30, hud_cy + hud_r + 20),
+            cv2.putText(frame, f"{ptr_angle.value:.1f} deg", (hud_cx - 30, hud_cy + hud_r + 20),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-        # 4. Text status HUD
+        # 5. Text status HUD
         status_y = 50
         cv2.putText(frame, "MinimapTracker Status HUD", (50, status_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
         
         status_y += 30
-        cv2.putText(frame, f"Pointer Detection: {'OK' if ptr_matched.value else 'LOST'}", 
+        cv2.putText(frame, f"CNN Pointer Detection: {'OK' if ptr_matched.value else 'LOST'}", 
                     (50, status_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0) if ptr_matched.value else (0, 0, 255), 1)
         
         status_y += 25
@@ -204,6 +203,7 @@ def main():
     # Clean up
     cap.release()
     writer.release()
+    lib.pointer_detector_release(pointer_detector)
     lib.player_tracker_release(tracker)
     print(f"Video processing complete. Output saved to: {out_video_path}")
     return 0

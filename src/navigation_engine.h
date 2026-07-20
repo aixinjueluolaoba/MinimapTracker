@@ -13,16 +13,25 @@ extern "C" {
 #endif
 
 // ==========================================
-// 1. Pointer Angle Detector API (指针角度检测)
+// 1. Neural Pointer Detector API (神经网络指针检测)
 // ==========================================
-NAV_EXPORT bool detect_pointer_angle_c(const int32_t* pixels, int width, int height,
-                                       float centerX, float centerY,
-                                       bool* has_match, int* angle_deg, float* confidence);
+
+// 创建指针检测器实例（自动载入 NCNN 格式的模型 param 和 bin 权重）
+NAV_EXPORT void* pointer_detector_create(const char* model_dir);
+
+// 传入整帧的 32 位 RGBA 像素数据，解算出指针朝向角度 (0~359.9度)
+NAV_EXPORT bool pointer_detector_detect(void* handle, const int32_t* frame_pixels, int w, int h,
+                                        bool* has_match, float* angle_deg, float* confidence);
+
+// 释放指针检测器实例，回收堆内存
+NAV_EXPORT void pointer_detector_release(void* handle);
+
 
 // ==========================================
 // 2. Hybrid Map Player Tracker API (地图定位器: SIFT + SuperPoint)
 // ==========================================
 
+// 初始化定位器（自动载入大地图、特征缓存和 NCNN param/bin 权重）
 NAV_EXPORT void* player_tracker_create(const char* map_path,
                                     const char* cache_path,
                                     const char* model_dir,
@@ -37,9 +46,11 @@ NAV_EXPORT void* player_tracker_create(const char* map_path,
                                     int min_match_count,
                                     double ransac_threshold);
 
+// 输入当前帧整幅图像的 32 位 RGBA 像素数据，解算出在大地图上的精确像素坐标 (out_x, out_y)
 NAV_EXPORT bool player_tracker_locate(void* handle, const int32_t* frame_pixels, int w, int h,
                                     float* out_x, float* out_y, float* confidence, int* cost_ms);
 
+// 释放定位器实例，回收堆内存
 NAV_EXPORT void player_tracker_release(void* handle);
 
 #ifdef __cplusplus

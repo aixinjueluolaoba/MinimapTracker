@@ -11,7 +11,7 @@
 ![MinimapTracker 系统架构](minimap_tracker_architecture_excalidraw.svg)
 
 本系统由两个核心处理模块构成：
-1. **小地图朝向检测器 (Pointer Angle Detector)**：使用二值颜色过滤与 BFS 连通域连通性分析，结合图像几何矩求解亚像素级别的物理指针旋转角度。
+1. **神经网络指针检测器 (Pointer Angle Detector)**：使用高性能 NCNN 引擎加载 CNN 卷积网络进行单次前向角度回归，解算极坐标下物理偏角（输出 `[sin, cos]` 后调用 `atan2`），相比传统基于颜色过滤与 BFS 的传统方法，大幅提升了光照渐变和指针对齐偏差下的检测稳定性。
 2. **混合地图定位引擎 (Hybrid Tracker)**：在启动时使用 **SIFT 快速粗配准**（支持特征缓存秒级加载）锁定玩家初始坐标；定位成功后自动切入由 NCNN 驱动的 **SuperPoint 深度特征网络局部追踪**，实现高帧率、低延迟的亚像素高精锁定。
 
 ---
@@ -36,12 +36,17 @@ cmake --build build
 
 头文件位于 `src/navigation_engine.h`。
 
-### 1. 指针朝向检测接口
+### 1. 神经网络指针检测接口
 ```cpp
-// 传入小地图指针区域像素，输出检测状态、角度(0~359度)和置信度
-NAV_EXPORT bool detect_pointer_angle_c(const int32_t* pixels, int width, int height,
-                                       float centerX, float centerY,
-                                       bool* has_match, int* angle_deg, float* confidence);
+// 1. 创建检测器实例（载入权重目录）
+NAV_EXPORT void* pointer_detector_create(const char* model_dir);
+
+// 2. 传入整帧的 32 位 RGBA 像素数据，解算出指针朝向角度 (0~359.9度)
+NAV_EXPORT bool pointer_detector_detect(void* handle, const int32_t* frame_pixels, int w, int h,
+                                        bool* has_match, float* angle_deg, float* confidence);
+
+// 3. 释放检测器实例，回收堆内存
+NAV_EXPORT void pointer_detector_release(void* handle);
 ```
 
 ### 2. SIFT + SuperPoint 定位跟踪接口

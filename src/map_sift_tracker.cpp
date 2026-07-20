@@ -162,6 +162,8 @@ struct Candidate {
     float score = 0.f;
     int x = 0;
     int y = 0;
+    Candidate() = default;
+    Candidate(float s, int px, int py) : score(s), x(px), y(py) {}
 };
 
 class NativeMapSiftTracker {
@@ -407,7 +409,7 @@ public:
         TRACK_LOGD("local SuperPoint resolution override=%dx%d", clamped_width, clamped_height);
     }
 
-private:
+public:
     static std::string derive_superpoint_cache_path(const std::string& sift_cache_path) {
         if (sift_cache_path.empty()) {
             return "";
@@ -1937,11 +1939,10 @@ bool player_tracker_locate(void* handle, const int32_t* frame_pixels, int w, int
 
         if (out_x) *out_x = result.x;
         if (out_y) *out_y = result.y;
-        // status: 2 = SIFT global success, 3 = SuperPoint local success. Both are successful matches.
-        if (confidence) *confidence = (result.status == 2 || result.status == 3) ? 1.0f : 0.0f;
+        if (confidence) *confidence = result.found ? 1.0f : 0.0f;
         if (cost_ms) *cost_ms = elapsed;
 
-        return result.status == 2 || result.status == 3;
+        return result.found;
     } catch (...) {
         return false;
     }

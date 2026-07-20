@@ -1,12 +1,27 @@
 #pragma once
 
-#include <cstdint>
+#include <string>
+#include <opencv2/opencv.hpp>
+#include <net.h>
 
-struct DetectResult {
-    bool has_match = false;
-    int angle_deg = 0;
-    float confidence = 0.f;
+struct PointerDetectResult {
+    bool has_match;
+    float angle_deg;
+    float confidence;
 };
 
-DetectResult detectPointerAngle(const int32_t* pixels, int width, int height,
-                                 float centerX, float centerY);
+class PointerAngleDetector {
+public:
+    PointerAngleDetector(const std::string& model_dir);
+    ~PointerAngleDetector() = default;
+
+    // Detects pointer angle from full 1280x720 BGR frame
+    PointerDetectResult detect(const cv::Mat& frame_bgr);
+
+    // Detects pointer angle from pre-cropped 32x32 patch
+    PointerDetectResult detect_patch(const cv::Mat& patch_bgr_32x32);
+
+private:
+    ncnn::Net net_;
+    bool loaded_ = false;
+};
