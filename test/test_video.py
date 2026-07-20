@@ -13,6 +13,37 @@ ROI_H = 23
 CENTER_X = 11.63
 CENTER_Y = 11.80
 
+class NavInput(ctypes.Structure):
+    _fields_ = [
+        ("track_x", ctypes.c_float),
+        ("track_y", ctypes.c_float),
+        ("track_found", ctypes.c_bool),
+        ("manual_required", ctypes.c_bool),
+        ("pointer_has_match", ctypes.c_bool),
+        ("pointer_angle_deg", ctypes.c_float),
+        ("pointer_frozen", ctypes.c_bool),
+        ("pointer_age_ms", ctypes.c_int64),
+        ("now_ms", ctypes.c_int64),
+    ]
+
+class NavOutput(ctypes.Structure):
+    _fields_ = [
+        ("action", ctypes.c_int),
+        ("status", ctypes.c_int),
+        ("sleep_ms", ctypes.c_int64),
+        ("hold_angle_deg", ctypes.c_float),
+        ("speed_percent", ctypes.c_int),
+        ("map_angle_deg", ctypes.c_float),
+        ("current_angle_deg", ctypes.c_float),
+        ("angle_delta_deg", ctypes.c_float),
+        ("signed_delta_deg", ctypes.c_float),
+        ("target_index", ctypes.c_int),
+        ("target_x", ctypes.c_float),
+        ("target_y", ctypes.c_float),
+        ("using_cached_track", ctypes.c_bool),
+        ("jump_requested", ctypes.c_bool),
+    ]
+
 def main():
     video_path = "/home/diana/fishing/video_20s.mp4"
     if len(sys.argv) > 1:
@@ -56,12 +87,9 @@ def main():
         ctypes.c_void_p, ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_int, ctypes.c_float, ctypes.c_float
     ]
 
-    lib.navigation_engine_step.restype = ctypes.c_bool
-    lib.navigation_engine_step.argtypes = [
-        ctypes.c_void_p, ctypes.c_float, ctypes.c_float, ctypes.c_bool, ctypes.c_bool, ctypes.c_bool, ctypes.c_float, ctypes.c_bool, ctypes.c_int64, ctypes.c_int64,
-        ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int64), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_int),
-        ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float),
-        ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_float), ctypes.POINTER(ctypes.c_bool), ctypes.POINTER(ctypes.c_bool)
+    lib.navigation_engine_step_struct.restype = ctypes.c_bool
+    lib.navigation_engine_step_struct.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(NavInput), ctypes.POINTER(NavOutput)
     ]
 
     lib.navigation_engine_release.restype = None
@@ -146,20 +174,35 @@ def main():
         # Run navigation step if pointer matches
         if has_match.value:
             now_ms = frame_idx * 300
-            lib.navigation_engine_step(
-                engine,
-                ctypes.c_float(sim_x), ctypes.c_float(sim_y),
-                True, # track_found
-                False, # manual_required
-                has_match.value,
-                ctypes.c_float(angle_deg.value),
-                False, # pointer_frozen
-                50,   # pointer_age_ms
-                now_ms,
-                ctypes.byref(action), ctypes.byref(status), ctypes.byref(sleep_ms), ctypes.byref(hold_angle_deg), ctypes.byref(speed_percent),
-                ctypes.byref(map_angle_deg), ctypes.byref(current_angle_deg), ctypes.byref(angle_delta_deg), ctypes.byref(signed_delta_deg),
-                ctypes.byref(target_index), ctypes.byref(out_target_x), ctypes.byref(out_target_y), ctypes.byref(using_cached_track), ctypes.byref(jump_requested)
+            nav_input = NavInput(
+                track_x=float(sim_x),
+                track_y=float(sim_y),
+                track_found=True,
+                manual_required=False,
+                pointer_has_match=has_match.value,
+                pointer_angle_deg=float(angle_deg.value),
+                pointer_frozen=False,
+                pointer_age_ms=50,
+                now_ms=now_ms
             )
+            nav_output = NavOutput()
+            lib.navigation_engine_step_struct(engine, ctypes.byref(nav_input), ctypes.byref(nav_output))
+
+            # Map struct output back to existing ctypes variables to keep visualization unchanged
+            action.value = nav_output.action
+            status.value = nav_output.status
+            sleep_ms.value = nav_output.sleep_ms
+            hold_angle_deg.value = nav_output.hold_angle_deg
+            speed_percent.value = nav_output.speed_percent
+            map_angle_deg.value = nav_output.map_angle_deg
+            current_angle_deg.value = nav_output.current_angle_deg
+            angle_delta_deg.value = nav_output.angle_delta_deg
+            signed_delta_deg.value = nav_output.signed_delta_deg
+            target_index.value = nav_output.target_index
+            out_target_x.value = nav_output.target_x
+            out_target_y.value = nav_output.target_y
+            using_cached_track.value = nav_output.using_cached_track
+            jump_requested.value = nav_output.jump_requested
 
             # Update simulated position based on control commands
             if status.value == kStatusMoving:

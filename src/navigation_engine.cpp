@@ -517,6 +517,19 @@ bool detect_pointer_angle_c(const int32_t* pixels, int width, int height,
     return true;
 }
 
+bool navigation_engine_step_struct(void* handle, const struct NavInput* input, struct NavOutput* output) {
+    if (!input || !output) return false;
+    return navigation_engine_step(
+        handle,
+        input->track_x, input->track_y, input->track_found, input->manual_required,
+        input->pointer_has_match, input->pointer_angle_deg, input->pointer_frozen,
+        input->pointer_age_ms, input->now_ms,
+        &output->action, &output->status, &output->sleep_ms, &output->hold_angle_deg, &output->speed_percent,
+        &output->map_angle_deg, &output->current_angle_deg, &output->angle_delta_deg, &output->signed_delta_deg,
+        &output->target_index, &output->target_x, &output->target_y, &output->using_cached_track, &output->jump_requested
+    );
+}
+
 } // extern "C"
 
 // --- Android JNI Export API Implementation ---

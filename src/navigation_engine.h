@@ -67,6 +67,38 @@ NAV_EXPORT bool detect_pointer_angle_c(const int32_t* pixels, int width, int hei
                                        float centerX, float centerY,
                                        bool* has_match, int* angle_deg, float* confidence);
 
+// Optimized structure-based navigation step API
+struct NavInput {
+    float track_x;
+    float track_y;
+    bool track_found;
+    bool manual_required;
+    bool pointer_has_match;
+    float pointer_angle_deg;
+    bool pointer_frozen;
+    int64_t pointer_age_ms;
+    int64_t now_ms;
+};
+
+struct NavOutput {
+    int action;
+    int status;
+    int64_t sleep_ms;
+    float hold_angle_deg;
+    int speed_percent;
+    float map_angle_deg;
+    float current_angle_deg;
+    float angle_delta_deg;
+    float signed_delta_deg;
+    int target_index;
+    float target_x;
+    float target_y;
+    bool using_cached_track;
+    bool jump_requested;
+};
+
+NAV_EXPORT bool navigation_engine_step_struct(void* handle, const struct NavInput* input, struct NavOutput* output);
+
 #ifdef __cplusplus
 }
 #endif
