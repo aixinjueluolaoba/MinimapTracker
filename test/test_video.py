@@ -137,17 +137,23 @@ def main():
         return -1
 
     frame_idx = 0
+    located_frames = 0
+    first_fix_frame = None
     while True:
         ret, frame = cap.read()
         if not ret:
             break
         frame_idx += 1
 
-        # Convert full frame to 32-bit RGBA (A=255) for NCNN CNN and SIFT/SP trackers
-        rgba_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
-        rgba_data = rgba_frame.astype(np.int32)
-        packed_frame = (255 << 24) | (rgba_data[:, :, 0] << 16) | (rgba_data[:, :, 1] << 8) | rgba_data[:, :, 2]
-        frame_pixels_flat = packed_frame.flatten()
+        # 打包成 ARGB packed int32：(A<<24)|(R<<16)|(G<<8)|B，与 Java int[] 一致。
+        # 必须在 uint32 下运算再按位重解释为 int32：0xFF000000 = 4278190080 超出
+        # int32 范围，numpy 2.x 会直接抛 OverflowError 而不是静默回绕。
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).astype(np.uint32)
+        packed_frame = (np.uint32(0xFF000000)
+                        | (rgb[:, :, 0] << 16)
+                        | (rgb[:, :, 1] << 8)
+                        | rgb[:, :, 2])
+        frame_pixels_flat = np.ascontiguousarray(packed_frame).view(np.int32).ravel()
         frame_ptr = frame_pixels_flat.ctypes.data_as(ctypes.POINTER(ctypes.c_int32))
 
         # ----------------- Neural Pointer Detection -----------------
@@ -170,6 +176,13 @@ def main():
             tracker, frame_ptr, width, height,
             ctypes.byref(loc_x), ctypes.byref(loc_y), ctypes.byref(loc_conf), ctypes.byref(loc_cost)
         )
+
+        if loc_success:
+            located_frames += 1
+            if first_fix_frame is None:
+                first_fix_frame = frame_idx
+                print(f"First fix on frame {frame_idx}: "
+                      f"({loc_x.value:.1f}, {loc_y.value:.1f}) in {loc_cost.value}ms")
 
         # Print progress info every 10 frames
         if frame_idx % 10 == 0 or frame_idx == 1:
@@ -228,7 +241,10 @@ def main():
     writer.release()
     lib.pointer_detector_release(pointer_detector)
     lib.player_tracker_release(tracker)
-    print(f"Video processing complete. Output saved to: {out_video_path}")
+    rate = located_frames / frame_idx * 100 if frame_idx else 0.0
+    print(f"\nC++ pipeline complete: {located_frames}/{frame_idx} frames located ({rate:.1f}%), "
+          f"first fix on frame {first_fix_frame}.")
+    print(f"Output saved to: {out_video_path}")
     return 0
 
 if __name__ == "__main__":

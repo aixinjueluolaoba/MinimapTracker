@@ -57,6 +57,19 @@ set_target_properties(
     IMPORTED_LOCATION ${NCNN_ROOT}/lib/libncnn.a
 )
 
+# 主机版的 ncnn 发行版是带 Vulkan 编译的，libncnn.a 会引用 glslang 系列符号
+# （glslang::TShader::parse 等）。不补上这些静态库，.so 能链接出来但 dlopen
+# 时会因 undefined symbol 失败，ctypes 测试根本加载不了。
+# Android 版的 ncnn 不带这些，故只在非 Android 分支处理。
+if (NOT ANDROID_ABI)
+    set(NCNN_GLSLANG_LIBS "")
+    foreach(_lib glslang-default-resource-limits glslang MachineIndependent GenericCodeGen SPIRV OSDependent)
+        if (EXISTS ${NCNN_ROOT}/lib/lib${_lib}.a)
+            list(APPEND NCNN_GLSLANG_LIBS ${NCNN_ROOT}/lib/lib${_lib}.a)
+        endif()
+    endforeach()
+endif()
+
 # 4. Include directories
 if (ANDROID_ABI)
     include_directories(
@@ -100,6 +113,7 @@ if (ANDROID_ABI)
 else()
     target_link_libraries(fishing_native PRIVATE
         ncnn
+        ${NCNN_GLSLANG_LIBS}
         pthread
         -fopenmp
         ${OpenCV_LIBS}
