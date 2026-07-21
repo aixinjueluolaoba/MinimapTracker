@@ -1,5 +1,9 @@
+// AndroidBitmap / android_log 只在 Android 上存在；jni.h 在主机上由 JDK 提供，
+// 所以纯 C API（player_tracker_*）可以脱离 Android 编译，供 ctypes 测试使用。
+#ifdef __ANDROID__
 #include <android/bitmap.h>
 #include <android/log.h>
+#endif
 #include <jni.h>
 
 #include <algorithm>
@@ -25,8 +29,14 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#ifdef __ANDROID__
 #define TRACK_LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "luoke", __VA_ARGS__)
 #define TRACK_LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "luoke", __VA_ARGS__)
+#else
+#include <cstdio>
+#define TRACK_LOGD(...) do { printf("[tracker DEBUG] "); printf(__VA_ARGS__); printf("\n"); } while(0)
+#define TRACK_LOGE(...) do { fprintf(stderr, "[tracker ERROR] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while(0)
+#endif
 
 namespace {
 
@@ -34,19 +44,14 @@ constexpr long long kGlobalSearchFallbackDelayMs = 2000;
 constexpr uint32_t kFeatureCacheMagic = 0x53465443;  // SFTC
 constexpr uint32_t kFeatureCacheVersion = 3;
 constexpr uint32_t kLegacyFeatureCacheVersion = 2;
-constexpr uint32_t kSuperPointCacheMagic = 0x53505443;  // SPTC
-constexpr uint32_t kSuperPointCacheVersion = 3;
 constexpr bool kEnableStepTiming = true;
 constexpr int kTimingLogInterval = 120;
 constexpr int kSlowLocalMatchLogMs = 250;
-constexpr int kFastNetWidth = 192;
-constexpr int kFastNetHeight = 192;
-constexpr int kPreciseNetWidth = 192;
-constexpr int kPreciseNetHeight = 192;
-constexpr int kFullNetWidth = 192;
-constexpr int kFullNetHeight = 192;
-constexpr int kMinOverrideNetWidth = 128;
-constexpr int kMinOverrideNetHeight = 128;
+// 局部 SuperPoint 提取时喂给网络的输入尺寸。
+// 曾经有 fast/precise/full 三档，但三者取值一直都是 192，从未真正区分过分辨率，
+// 只是被借用来切换特征来源。特征来源的分支已删除，这里合并成单一常量。
+constexpr int kLocalNetWidth = 192;
+constexpr int kLocalNetHeight = 192;
 constexpr int kGridStride = 8;
 constexpr int kDescriptorDim = 256;
 constexpr int kMaxKeypoints = 512;
@@ -104,17 +109,6 @@ struct CacheHeader {
     int32_t descriptor_cols = 0;
     int32_t descriptor_type = 0;
     int32_t keypoint_count = 0;
-};
-
-struct SuperPointCacheHeader {
-    uint32_t magic = kSuperPointCacheMagic;
-    uint32_t version = kSuperPointCacheVersion;
-    int64_t map_size = 0;
-    int64_t map_mtime_sec = 0;
-    int32_t map_width = 0;
-    int32_t map_height = 0;
-    int32_t descriptor_count = 0;
-    int32_t descriptor_dim = 256;
 };
 
 struct CacheKeyPoint {
@@ -187,7 +181,6 @@ public:
               minimap_height_(minimap_height),
               map_path_(map_path),
               cache_path_(cache_path),
-              superpoint_cache_path_(derive_superpoint_cache_path(cache_path)),
               model_dir_(model_dir),
               base_search_radius_(base_search_radius),
               current_search_radius_(base_search_radius),
@@ -233,15 +226,8 @@ public:
                                            "official_superpoint_dense_480x640_int8.bin"),
                         "SuperPoint");
 
-        if (!load_superpoint_cache()) {
-            TRACK_LOGD("SuperPoint cache unavailable; extracting tiled full map features path=%s",
-                       superpoint_cache_path_.c_str());
-            build_tiled_superpoint_cache();
-            save_superpoint_cache();
-        }
-
         reset_to_global_search();
-        TRACK_LOGD("hybrid tracker ready map=%dx%d minimap=(%d,%d %dx%d) baseRadius=%d siftFeatures=%zu superpointFeatures=%d localSpCache=memory",
+        TRACK_LOGD("hybrid tracker ready map=%dx%d minimap=(%d,%d %dx%d) baseRadius=%d siftFeatures=%zu localSpCache=memory",
                    map_width_,
                    map_height_,
                    minimap_left_,
@@ -249,10 +235,12 @@ public:
                    minimap_width_,
                    minimap_height_,
                    base_search_radius_,
-                   full_map_keypoints_.size(),
-                   full_map_sp_features_.size());
+                   full_map_keypoints_.size());
     }
 
+#ifdef __ANDROID__
+    // 以下两个入口直接消费 AndroidBitmap，只在 Android 上可用。
+    // 主机侧请走 player_tracker_locate()，它接的是同一台状态机 track_minimap()。
     TrackResult track(JNIEnv* env, jobject bitmap) {
         const auto start = std::chrono::steady_clock::now();
         TrackResult result = make_status_result();
@@ -344,6 +332,7 @@ public:
         result.cost_ms = static_cast<int>(elapsed_ms(start, std::chrono::steady_clock::now()));
         return result;
     }
+#endif  // __ANDROID__
 
     void set_manual_position(float x, float y) {
         smoothed_cx_ = round_to_tenth(std::clamp(x, 0.f, static_cast<float>(map_width_ - 1)));
@@ -353,7 +342,6 @@ public:
         has_position_ = true;
         has_smoothed_position_ = true;
         has_cached_local_sp_features_ = false;
-        local_sp_failure_streak_ = 0;
         lost_frames_ = 0;
         has_local_failure_since_ = false;
         current_search_radius_ = base_search_radius_;
@@ -366,62 +354,7 @@ public:
         reset_to_global_search();
     }
 
-    void set_precise_tracking(bool enabled) {
-        if (precise_tracking_mode_ == enabled) {
-            return;
-        }
-        precise_tracking_mode_ = enabled;
-        has_cached_local_sp_features_ = false;
-        cached_local_sp_rect_ = cv::Rect();
-        cached_local_sp_width_ = 0;
-        cached_local_sp_height_ = 0;
-        local_sp_failure_streak_ = 0;
-        TRACK_LOGD("precise tracking mode=%d", precise_tracking_mode_ ? 1 : 0);
-    }
-
-    void set_retry_full_resolution_enabled(bool enabled) {
-        if (retry_full_resolution_enabled_ == enabled) {
-            return;
-        }
-        retry_full_resolution_enabled_ = enabled;
-        has_cached_local_sp_features_ = false;
-        cached_local_sp_rect_ = cv::Rect();
-        cached_local_sp_width_ = 0;
-        cached_local_sp_height_ = 0;
-        local_sp_failure_streak_ = 0;
-        TRACK_LOGD("retry full resolution mode=%d", retry_full_resolution_enabled_ ? 1 : 0);
-    }
-
-    void set_local_superpoint_resolution(int width, int height) {
-        int clamped_width = std::clamp(width, kMinOverrideNetWidth, kPreciseNetWidth);
-        int clamped_height = std::clamp(height, kMinOverrideNetHeight, kPreciseNetHeight);
-        if (local_sp_width_override_ == clamped_width
-                && local_sp_height_override_ == clamped_height) {
-            return;
-        }
-        local_sp_width_override_ = clamped_width;
-        local_sp_height_override_ = clamped_height;
-        has_cached_local_sp_features_ = false;
-        cached_local_sp_rect_ = cv::Rect();
-        cached_local_sp_width_ = 0;
-        cached_local_sp_height_ = 0;
-        local_sp_failure_streak_ = 0;
-        TRACK_LOGD("local SuperPoint resolution override=%dx%d", clamped_width, clamped_height);
-    }
-
 public:
-    static std::string derive_superpoint_cache_path(const std::string& sift_cache_path) {
-        if (sift_cache_path.empty()) {
-            return "";
-        }
-        const std::string suffix = ".siftbin";
-        if (sift_cache_path.size() >= suffix.size()
-                && sift_cache_path.compare(sift_cache_path.size() - suffix.size(), suffix.size(), suffix) == 0) {
-            return sift_cache_path.substr(0, sift_cache_path.size() - suffix.size()) + ".superpointbin";
-        }
-        return sift_cache_path + ".superpointbin";
-    }
-
     std::string resolve_model_path(const char* preferred_file_name,
                                    const char* fallback_file_name) const {
         std::string preferred = model_path(preferred_file_name);
@@ -636,19 +569,8 @@ public:
     TrackResult track_minimap_superpoint_local(const cv::Mat& minimap_bgr, StepTiming& timing) {
         const auto local_start = std::chrono::steady_clock::now();
         timing.global_search = false;
-        const bool has_resolution_override = local_sp_width_override_ > 0 && local_sp_height_override_ > 0;
-        const bool use_retry_resolution = retry_full_resolution_enabled_ && local_sp_failure_streak_ >= 1;
-        const bool use_precise_resolution = precise_tracking_mode_;
-        const int sp_width = has_resolution_override
-                ? local_sp_width_override_
-                : (use_precise_resolution
-                        ? kPreciseNetWidth
-                        : (use_retry_resolution ? kFullNetWidth : kFastNetWidth));
-        const int sp_height = has_resolution_override
-                ? local_sp_height_override_
-                : (use_precise_resolution
-                        ? kPreciseNetHeight
-                        : (use_retry_resolution ? kFullNetHeight : kFastNetHeight));
+        const int sp_width = kLocalNetWidth;
+        const int sp_height = kLocalNetHeight;
         timing.sp_width = sp_width;
         timing.sp_height = sp_height;
         const char* map_feature_source = "none";
@@ -673,7 +595,6 @@ public:
             return result;
         };
         auto fail_local = [&](int good_matches, int inlier_matches = 0, float inlier_ratio = 0.f) -> TrackResult {
-            local_sp_failure_streak_ += 1;
             has_cached_local_sp_features_ = false;
             return handle_failure(good_matches, inlier_matches, inlier_ratio, false);
         };
@@ -703,17 +624,10 @@ public:
             timing.subset_ms = elapsed_ms(subset_start, subset_end);
             map_feature_source = "memory-cache";
         } else {
-            const bool can_use_full_map_cache = !use_precise_resolution
-                    && !use_retry_resolution
-                    && full_map_sp_features_.size() >= 4;
-            if (can_use_full_map_cache) {
-                const auto subset_start = std::chrono::steady_clock::now();
-                build_superpoint_feature_subset(search_rect, map_features);
-                const auto subset_end = std::chrono::steady_clock::now();
-                timing.subset_ms = elapsed_ms(subset_start, subset_end);
-                map_feature_source = "full-map-cache";
-            }
-            if (map_features.size() < 4) {
+            // 曾经这里会优先从全图 SuperPoint 特征缓存取子集。那份缓存是分块降采样提取的，
+            // 全图仅约 7k 个特征，落到 300x300 窗口内平均只剩 ~17 个，实测 0/111 成功，
+            // 已连同缓存本身一并删除。现在恒定对地图裁剪现场提取（实测 110/110）。
+            {
                 cv::Mat map_crop = logic_map_bgr_(search_rect);
                 const auto map_start = std::chrono::steady_clock::now();
                 map_features = extract_superpoint(
@@ -780,10 +694,7 @@ public:
         }
 
         TrackResult result = finish_matched_points(src_points, dst_points, timing.good_matches, false, timing);
-        if (result.found && !result.inertial) {
-            local_sp_failure_streak_ = 0;
-        } else {
-            local_sp_failure_streak_ += 1;
+        if (!result.found || result.inertial) {
             has_cached_local_sp_features_ = false;
         }
         return finish_local(result, result.found ? (result.inertial ? "inertial" : "ok") : "not_found");
@@ -902,8 +813,8 @@ public:
     FeatureSet extract_superpoint(const cv::Mat& source_bgr,
                                   const cv::Point2f& origin,
                                   const cv::Size2f& original_size,
-                                  int net_width = kFastNetWidth,
-                                  int net_height = kFastNetHeight) {
+                                  int net_width = kLocalNetWidth,
+                                  int net_height = kLocalNetHeight) {
         cv::Mat resized;
         cv::resize(source_bgr, resized, cv::Size(net_width, net_height), 0, 0, cv::INTER_AREA);
         cv::Mat gray;
@@ -1090,19 +1001,18 @@ public:
             has_smoothed_position_ = true;
             return true;
         }
+        // 以下三个常量原先随 precise_tracking_mode_ 二选一。该模式已固定为开启
+        // （关闭时局部匹配走稀疏全图缓存，实测 0/111 成功），故直接取 precise 那一档：
+        // 局部特征是现场提取的，质量高，可以卡更严的跳变阈值并更信任新解。
         float distance = std::hypot(raw_x - smoothed_cx_, raw_y - smoothed_cy_);
-        float max_jump = precise_tracking_mode_ ? 40.f : 150.f;
-        if (distance >= max_jump) {
+        if (distance >= 40.f) {
             return false;
         }
         float base_alpha = distance < 15.f ? 0.15f : 0.45f;
         float inlier_term = std::clamp((static_cast<float>(inlier_count) - 8.f) / 24.f, 0.f, 1.f);
         float ratio_term = std::clamp((inlier_ratio - 0.20f) / 0.50f, 0.f, 1.f);
         float confidence = std::max(inlier_term, ratio_term);
-        float alpha = base_alpha + confidence * (precise_tracking_mode_ ? 0.30f : 0.10f);
-        alpha = precise_tracking_mode_
-                ? std::clamp(alpha, 0.35f, 0.85f)
-                : std::clamp(alpha, 0.15f, 0.55f);
+        float alpha = std::clamp(base_alpha + confidence * 0.30f, 0.35f, 0.85f);
         smoothed_cx_ = alpha * raw_x + (1.f - alpha) * smoothed_cx_;
         smoothed_cy_ = alpha * raw_y + (1.f - alpha) * smoothed_cy_;
         return true;
@@ -1112,7 +1022,6 @@ public:
         has_position_ = false;
         has_smoothed_position_ = false;
         has_cached_local_sp_features_ = false;
-        local_sp_failure_streak_ = 0;
         manual_required_ = false;
         lost_frames_ = 0;
         has_local_failure_since_ = false;
@@ -1192,33 +1101,6 @@ public:
         }
     }
 
-    void build_superpoint_feature_subset(const cv::Rect& search_rect, FeatureSet& features) const {
-        features.net_points.clear();
-        features.original_points.clear();
-        features.scores.clear();
-        features.descriptors.clear();
-
-        const int full_count = full_map_sp_features_.size();
-        features.original_points.reserve(std::min(full_count, 1024));
-        features.scores.reserve(std::min(full_count, 1024));
-        features.descriptors.reserve(static_cast<size_t>(std::min(full_count, 1024)) * kDescriptorDim);
-        for (int index = 0; index < full_count; index++) {
-            const cv::Point2f& point = full_map_sp_features_.original_points[index];
-            if (point.x < static_cast<float>(search_rect.x)
-                    || point.x >= static_cast<float>(search_rect.x + search_rect.width)
-                    || point.y < static_cast<float>(search_rect.y)
-                    || point.y >= static_cast<float>(search_rect.y + search_rect.height)) {
-                continue;
-            }
-            features.original_points.push_back(point);
-            features.scores.push_back(full_map_sp_features_.scores[index]);
-            const size_t offset = static_cast<size_t>(index) * kDescriptorDim;
-            features.descriptors.insert(features.descriptors.end(),
-                                        full_map_sp_features_.descriptors.begin() + static_cast<ptrdiff_t>(offset),
-                                        full_map_sp_features_.descriptors.begin() + static_cast<ptrdiff_t>(offset + kDescriptorDim));
-        }
-    }
-
     static int clamp_to_map(long value, int upper_bound) {
         return static_cast<int>(std::clamp(value, 0L, static_cast<long>(upper_bound - 1)));
     }
@@ -1295,174 +1177,6 @@ public:
             occupied.emplace(superpoint_cell_key(cell_x, cell_y), kept_index);
         }
         return kept;
-    }
-
-    bool load_superpoint_cache() {
-        if (superpoint_cache_path_.empty()) {
-            return false;
-        }
-
-        struct stat map_stat {};
-        if (stat(map_path_.c_str(), &map_stat) != 0) {
-            return false;
-        }
-
-        std::ifstream input(superpoint_cache_path_, std::ios::binary);
-        if (!input.is_open()) {
-            return false;
-        }
-
-        SuperPointCacheHeader header;
-        input.read(reinterpret_cast<char*>(&header), sizeof(header));
-        if (!input
-                || header.magic != kSuperPointCacheMagic
-                || header.version != kSuperPointCacheVersion
-                || header.map_size != static_cast<int64_t>(map_stat.st_size)
-                || header.map_width != map_width_
-                || header.map_height != map_height_
-                || header.descriptor_count < 4
-                || header.descriptor_dim != kDescriptorDim) {
-            TRACK_LOGD("SuperPoint cache rejected path=%s magic=%u version=%u size=%lld/%lld dims=%dx%d/%dx%d count=%d dim=%d",
-                       superpoint_cache_path_.c_str(),
-                       header.magic,
-                       header.version,
-                       static_cast<long long>(header.map_size),
-                       static_cast<long long>(map_stat.st_size),
-                       header.map_width,
-                       header.map_height,
-                       map_width_,
-                       map_height_,
-                       header.descriptor_count,
-                       header.descriptor_dim);
-            return false;
-        }
-        if (header.map_mtime_sec != static_cast<int64_t>(map_stat.st_mtime)) {
-            TRACK_LOGD("SuperPoint cache accepted with map mtime mismatch path=%s cacheMtime=%lld mapMtime=%lld",
-                       superpoint_cache_path_.c_str(),
-                       static_cast<long long>(header.map_mtime_sec),
-                       static_cast<long long>(map_stat.st_mtime));
-        }
-
-        FeatureSet features;
-        features.original_points.reserve(header.descriptor_count);
-        features.scores.reserve(header.descriptor_count);
-        features.descriptors.resize(static_cast<size_t>(header.descriptor_count) * kDescriptorDim);
-        for (int index = 0; index < header.descriptor_count; index++) {
-            float x = 0.f;
-            float y = 0.f;
-            float score = 0.f;
-            input.read(reinterpret_cast<char*>(&x), sizeof(x));
-            input.read(reinterpret_cast<char*>(&y), sizeof(y));
-            input.read(reinterpret_cast<char*>(&score), sizeof(score));
-            if (!input) {
-                return false;
-            }
-            features.original_points.emplace_back(x, y);
-            features.scores.push_back(score);
-        }
-
-        const size_t byte_count = features.descriptors.size() * sizeof(float);
-        input.read(reinterpret_cast<char*>(features.descriptors.data()), static_cast<std::streamsize>(byte_count));
-        if (!input) {
-            return false;
-        }
-
-        full_map_sp_features_ = std::move(features);
-        TRACK_LOGD("loaded full map SuperPoint cache path=%s count=%d",
-                   superpoint_cache_path_.c_str(),
-                   full_map_sp_features_.size());
-        return true;
-    }
-
-    void save_superpoint_cache() const {
-        if (superpoint_cache_path_.empty()
-                || full_map_sp_features_.size() < 4
-                || full_map_sp_features_.descriptors.size()
-                        < static_cast<size_t>(full_map_sp_features_.size() * kDescriptorDim)) {
-            return;
-        }
-
-        struct stat map_stat {};
-        if (stat(map_path_.c_str(), &map_stat) != 0) {
-            return;
-        }
-
-        std::ofstream output(superpoint_cache_path_, std::ios::binary | std::ios::trunc);
-        if (!output.is_open()) {
-            TRACK_LOGE("failed to open SuperPoint cache for write: %s", superpoint_cache_path_.c_str());
-            return;
-        }
-
-        SuperPointCacheHeader header;
-        header.map_size = static_cast<int64_t>(map_stat.st_size);
-        header.map_mtime_sec = static_cast<int64_t>(map_stat.st_mtime);
-        header.map_width = map_width_;
-        header.map_height = map_height_;
-        header.descriptor_count = full_map_sp_features_.size();
-        header.descriptor_dim = kDescriptorDim;
-        output.write(reinterpret_cast<const char*>(&header), sizeof(header));
-        for (int index = 0; index < full_map_sp_features_.size(); index++) {
-            const cv::Point2f& point = full_map_sp_features_.original_points[index];
-            float score = full_map_sp_features_.scores[index];
-            output.write(reinterpret_cast<const char*>(&point.x), sizeof(point.x));
-            output.write(reinterpret_cast<const char*>(&point.y), sizeof(point.y));
-            output.write(reinterpret_cast<const char*>(&score), sizeof(score));
-        }
-        const size_t byte_count = full_map_sp_features_.descriptors.size() * sizeof(float);
-        output.write(reinterpret_cast<const char*>(full_map_sp_features_.descriptors.data()),
-                     static_cast<std::streamsize>(byte_count));
-        if (!output.good()) {
-            TRACK_LOGE("failed to save SuperPoint cache: %s", superpoint_cache_path_.c_str());
-            return;
-        }
-        TRACK_LOGD("saved full map SuperPoint cache path=%s count=%d",
-                   superpoint_cache_path_.c_str(),
-                   full_map_sp_features_.size());
-    }
-
-    void build_tiled_superpoint_cache() {
-        const std::vector<int> tile_xs = make_tile_starts(map_width_);
-        const std::vector<int> tile_ys = make_tile_starts(map_height_);
-        FeatureSet raw_features;
-        raw_features.original_points.reserve(tile_xs.size() * tile_ys.size() * 128);
-        raw_features.scores.reserve(tile_xs.size() * tile_ys.size() * 128);
-        raw_features.descriptors.reserve(tile_xs.size() * tile_ys.size() * 128 * kDescriptorDim);
-
-        int tile_count = 0;
-        for (int tile_y : tile_ys) {
-            for (int tile_x : tile_xs) {
-                cv::Rect tile_rect(
-                        tile_x,
-                        tile_y,
-                        std::min(kSuperPointTileSize, map_width_ - tile_x),
-                        std::min(kSuperPointTileSize, map_height_ - tile_y));
-                FeatureSet tile_features = extract_superpoint(
-                        logic_map_bgr_(tile_rect),
-                        cv::Point2f(static_cast<float>(tile_rect.x), static_cast<float>(tile_rect.y)),
-                        cv::Size2f(static_cast<float>(tile_rect.width), static_cast<float>(tile_rect.height)));
-                for (int index = 0; index < tile_features.size(); index++) {
-                    raw_features.original_points.push_back(tile_features.original_points[index]);
-                    raw_features.scores.push_back(tile_features.scores[index]);
-                    const size_t offset = static_cast<size_t>(index) * kDescriptorDim;
-                    raw_features.descriptors.insert(raw_features.descriptors.end(),
-                                                    tile_features.descriptors.begin() + static_cast<ptrdiff_t>(offset),
-                                                    tile_features.descriptors.begin() + static_cast<ptrdiff_t>(offset + kDescriptorDim));
-                }
-                tile_count += 1;
-                if ((tile_count % 5) == 0) {
-                    TRACK_LOGD("SuperPoint tiled extraction progress tiles=%d/%zu rawFeatures=%d",
-                               tile_count,
-                               tile_xs.size() * tile_ys.size(),
-                               raw_features.size());
-                }
-            }
-        }
-
-        full_map_sp_features_ = dedupe_superpoint_features(raw_features);
-        TRACK_LOGD("SuperPoint tiled extraction complete tiles=%d rawFeatures=%d kept=%d",
-                   tile_count,
-                   raw_features.size(),
-                   full_map_sp_features_.size());
     }
 
     bool load_feature_cache() {
@@ -1626,7 +1340,6 @@ public:
     int track_count_ = 0;
     std::string map_path_;
     std::string cache_path_;
-    std::string superpoint_cache_path_;
     std::string model_dir_;
     int minimap_left_;
     int minimap_top_;
@@ -1643,16 +1356,11 @@ public:
     int last_x_ = 0;
     int last_y_ = 0;
     int lost_frames_ = 0;
-    int local_sp_failure_streak_ = 0;
     bool has_position_ = false;
     bool has_smoothed_position_ = false;
     bool manual_required_ = false;
     bool has_cached_local_sp_features_ = false;
     bool has_local_failure_since_ = false;
-    bool precise_tracking_mode_ = false;
-    bool retry_full_resolution_enabled_ = true;
-    int local_sp_width_override_ = 0;
-    int local_sp_height_override_ = 0;
     float smoothed_cx_ = 0.f;
     float smoothed_cy_ = 0.f;
     std::chrono::steady_clock::time_point local_failure_since_;
@@ -1662,7 +1370,6 @@ public:
     cv::Mat logic_map_bgr_;
     std::vector<cv::KeyPoint> full_map_keypoints_;
     cv::Mat full_map_descriptors_;
-    FeatureSet full_map_sp_features_;
     cv::Rect cached_local_sp_rect_;
     int cached_local_sp_width_ = 0;
     int cached_local_sp_height_ = 0;
@@ -1674,6 +1381,7 @@ public:
     ncnn::Net superpoint_net_;
 };
 
+#ifdef __ANDROID__
 jfloatArray make_track_payload(JNIEnv* env, const TrackResult& result) {
     jfloat payload[30] = {0.f};
     payload[0] = static_cast<jfloat>(result.cost_ms);
@@ -1694,6 +1402,7 @@ jfloatArray make_track_payload(JNIEnv* env, const TrackResult& result) {
     env->SetFloatArrayRegion(out, 0, 30, payload);
     return out;
 }
+#endif  // __ANDROID__
 
 template <typename T>
 T* from_handle(jlong handle) {
@@ -1701,6 +1410,9 @@ T* from_handle(jlong handle) {
 }
 
 }  // namespace
+
+// MapSiftTracker 的 JNI 绑定层只在 Android 上编译；主机构建只导出下方的纯 C API。
+#ifdef __ANDROID__
 
 extern "C"
 JNIEXPORT jlong JNICALL
@@ -1811,48 +1523,10 @@ Java_com_example_myapplication_MapSiftTracker_nativeForceGlobalSearch(
     tracker->force_global_search();
 }
 
-extern "C"
-JNIEXPORT void JNICALL
-Java_com_example_myapplication_MapSiftTracker_nativeSetPreciseTracking(
-        JNIEnv*,
-        jclass,
-        jlong handle,
-        jboolean enabled) {
-    auto* tracker = from_handle<NativeMapSiftTracker>(handle);
-    if (tracker == nullptr) {
-        return;
-    }
-    tracker->set_precise_tracking(enabled == JNI_TRUE);
-}
-
-extern "C"
-JNIEXPORT void JNICALL
-Java_com_example_myapplication_MapSiftTracker_nativeSetRetryFullResolutionEnabled(
-        JNIEnv*,
-        jclass,
-        jlong handle,
-        jboolean enabled) {
-    auto* tracker = from_handle<NativeMapSiftTracker>(handle);
-    if (tracker == nullptr) {
-        return;
-    }
-    tracker->set_retry_full_resolution_enabled(enabled == JNI_TRUE);
-}
-
-extern "C"
-JNIEXPORT void JNICALL
-Java_com_example_myapplication_MapSiftTracker_nativeSetLocalSuperPointResolution(
-        JNIEnv*,
-        jclass,
-        jlong handle,
-        jint width,
-        jint height) {
-    auto* tracker = from_handle<NativeMapSiftTracker>(handle);
-    if (tracker == nullptr) {
-        return;
-    }
-    tracker->set_local_superpoint_resolution(width, height);
-}
+// nativeSetPreciseTracking / nativeSetRetryFullResolutionEnabled /
+// nativeSetLocalSuperPointResolution 三个 setter 已随对应模式一并删除：
+// 它们控制的是"局部匹配改用稀疏全图缓存"这条实测 0/111 成功的路径。
+// 注意 app 侧编译的是 app/src/main/cpp/ 下的独立副本，不受此处影响。
 
 extern "C"
 JNIEXPORT jfloatArray JNICALL
@@ -1876,6 +1550,8 @@ Java_com_example_myapplication_MapSiftTracker_nativeRelease(
         jlong handle) {
     delete from_handle<NativeMapSiftTracker>(handle);
 }
+
+#endif  // __ANDROID__
 
 // --- C Export API for Universal Player Tracker ---
 
