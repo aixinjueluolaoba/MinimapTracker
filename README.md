@@ -53,12 +53,29 @@ HUD 各部分含义：
 
 ## 🎨 系统架构
 
-![MinimapTracker 系统架构](minimap_tracker_architecture_excalidraw.svg)
+![MinimapTracker 架构](images/minimap_tracker_architecture.svg)
+
+图中所有参数与数字都取自已验证的实现，不含设计意图。改完用下面三步重新出图：
+
+```bash
+# 1. 生成 excalidraw 场景
+python3 images/generate_architecture.py images/minimap_tracker_architecture.excalidraw
+# 2. 渲染为手绘风 SVG
+node ~/.agents/skills/video-notes-generator/scripts/render_excalidraw.js \
+     images/minimap_tracker_architecture.excalidraw \
+     images/minimap_tracker_architecture.svg
+# 3. 内嵌中文字体子集（必做）
+python3 images/embed_cjk_font.py images/minimap_tracker_architecture.svg
+```
+
+第 3 步不能省：excalidraw 内嵌的 Virgil 是拉丁手绘字体，**没有 CJK 字形**。不处理的话中文会回退到查看端的系统字体 —— 没装中文字体的环境里直接变豆腐块。该脚本把图中实际用到的汉字（当前 135 个）从 Noto Sans CJK 子集化成 woff2（23 KB）内联进 SVG，成品零外部引用，到哪都一样。图形部分仍由 roughjs 生成，保持手绘感。
 
 两个核心模块：
 
 1. **神经网络指针检测器**：NCNN 加载 CNN 做单次前向角度回归，输出 `[sin, cos]` 后 `atan2` 解角。相比传统的颜色过滤 + BFS 连通域方法，在光照渐变和指针对齐偏差下更稳。
-2. **混合地图定位引擎**：启动或丢失时用 **SIFT 全局配准**（特征带缓存）锁定坐标；锁定后切 **SuperPoint** 局部深度特征追踪，把搜索限制在上一帧位置 ±150 px（即 300×300 窗口）。
+2. **混合地图定位引擎**：全自动状态机（`track_minimap()`，`src/map_sift_tracker.cpp`）。调用方每帧丢进一整帧像素即可，不需要自己判断该用哪种模式：未定位时全局 SIFT 配准，锁定后切 SuperPoint 局部追踪（搜索窗口 = 上一帧 ±150 px），局部持续失败 ≥ 2000ms 则回退全局。
+
+全局搜索有 2 秒节流（`kGlobalSearchFallbackDelayMs`），避免丢失时 CPU 打满。
 
 ---
 
@@ -192,7 +209,29 @@ python3 test/test_video.py [视频路径]
 
 ## 📌 已知限制
 
-* **SuperPoint 局部追踪路径尚未端到端验证** —— 需要 Android 设备或可用的主机构建。上面的实测数据全部来自纯 Python 的 SIFT 路径。
+* **必须调用 `player_tracker_set_precise_tracking(handle, true)`，否则定位成功率腰斩。**
+
+  这个开关默认关闭，但基本上没有理由关。实测（`test/test_video.py`，298 帧）：
+
+  | 精确追踪 | 定位成功率 |
+  |---|---|
+  | 关（默认） | 184/298 = **61.7%** |
+  | 开 | 295/298 = **99.0%** |
+
+  原因在 SuperPoint 局部匹配的地图特征来源。关闭时优先从**全图特征缓存**取子集，
+  而该缓存是分块降采样提取的，全图仅 6949 个特征（SIFT 是 139709），落到 300×300
+  搜索窗口内平均只有 ~17 个，实测 good match 中位数 7、内点中位数 4，而门禁要求
+  20 good / 15 inliers —— 这条分支实测 **0/111 成功**。
+
+  失败后 `retry_full_resolution_enabled_`（默认开）会让下一帧改用**局部裁剪现场提取**，
+  那条分支实测 **110/110 成功**。但成功会把 `local_sp_failure_streak_` 清零
+  （`map_sift_tracker.cpp:798`），于是下一帧又退回缓存分支 —— **每隔一帧振荡一次**，
+  成功率正好被砍半。
+
+  打开精确追踪后 `can_use_full_map_cache` 恒为 false，永远走现场提取，振荡消失。
+  Android app 侧（`ScreenRecorderService.java:148` 默认 `true`，第 508 行传入）一直是
+  打开的，这就是 app 的局部匹配一直正常、而抽出来的库不正常的全部原因 ——
+  算法一字未改，缺的是这个开关。
 * CNN 没有拒识能力，上层若需要"当前帧是否有指针"的判断，得自己补。
 * 与原 Rust 算法交叉验证时，约 6.6% 的帧差异较大（最大 173.8°），尚未逐帧归因。
 * 演示录像的游戏画面顶部本身就显示玩家坐标，可作 ground truth 逐帧比对精度 —— 尚未做。
