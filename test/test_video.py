@@ -5,11 +5,20 @@ import ctypes
 import os
 import sys
 
-# Minimap region in the 1280x720 frame (used by SIFT/SuperPoint hybrid tracker)
-MINIMAP_LEFT = 1100
-MINIMAP_TOP = 50
-MINIMAP_WIDTH = 150
-MINIMAP_HEIGHT = 150
+# Minimap region in the 1280x720 frame (used by SIFT/SuperPoint hybrid tracker).
+# 必须与生产端一致，见 app/src/main/java/com/example/myapplication/MapSiftTracker.java:8-11
+MINIMAP_LEFT = 1072
+MINIMAP_TOP = 25
+MINIMAP_WIDTH = 127
+MINIMAP_HEIGHT = 127
+
+# 跟踪参数同样取自 MapSiftTracker.java:12-17
+BASE_SEARCH_RADIUS = 150
+MAX_LOST_FRAMES = 4
+CLAHE_LIMIT = 3.0
+MATCH_RATIO = 0.9
+MIN_MATCH_COUNT = 5
+RANSAC_THRESHOLD = 8.0
 
 def main():
     # Use the official user-provided test video
@@ -30,17 +39,22 @@ def main():
 
     print(f"Video Info: {width}x{height}, {fps} FPS, {total_frames} frames total.")
 
-    out_video_path = "/home/diana/洛克导航/navigation_engine/test_output.mp4"
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    writer = cv2.VideoWriter(out_video_path, fourcc, fps, (width, height))
-    if not writer.isOpened():
-        print("Error: Could not open VideoWriter for saving output.", file=sys.stderr)
-        return -1
-
+    # 先校验前置条件再建 VideoWriter：VideoWriter 一创建就会把目标文件截断，
+    # 若之后才发现 .so 缺失并返回，就会留下一个 0 帧的空视频（并覆盖掉别人的产物）。
     # Load Navigation Engine SO Library
     so_path = "/home/diana/洛克导航/navigation_engine/build/libfishing_native.so"
     if not os.path.exists(so_path):
-        print(f"Error: Shared library not found at {so_path}. Please compile the project first.", file=sys.stderr)
+        print(f"Error: Shared library not found at {so_path}.\n"
+              "本机构建目前是跑不通的，原因有两个，都要先解决：\n"
+              "  1. 宿主没有安装 OpenCV C++ 开发包（全盘找不到 OpenCVConfig.cmake），\n"
+              "     find_package(OpenCV REQUIRED) 必然失败；\n"
+              "  2. PATH 里的 `cc` 是一个 claude 启动脚本而不是编译器，cmake 探测编译器会报\n"
+              "     \"unknown option '-o'\"，所以必须显式指定编译器。\n"
+              "装好 OpenCV 之后用：\n"
+              "  cmake -DCMAKE_C_COMPILER=/usr/bin/gcc -DCMAKE_CXX_COMPILER=/usr/bin/g++ \\\n"
+              "        -DCMAKE_CXX_STANDARD=17 -S . -B build && cmake --build build\n"
+              "在此之前请改用不依赖 .so 的 test/test_video_pure_python.py。",
+              file=sys.stderr)
         return -1
 
     lib = ctypes.CDLL(so_path)
@@ -99,12 +113,12 @@ def main():
         cache_path,
         superpoint_model_dir,
         MINIMAP_LEFT, MINIMAP_TOP, MINIMAP_WIDTH, MINIMAP_HEIGHT,
-        150,     # base_search_radius
-        10,      # max_lost_frames
-        40.0,    # clahe_limit
-        0.8,     # match_ratio
-        4,       # min_match_count
-        8.0      # ransac_threshold
+        BASE_SEARCH_RADIUS,
+        MAX_LOST_FRAMES,
+        CLAHE_LIMIT,
+        MATCH_RATIO,
+        MIN_MATCH_COUNT,
+        RANSAC_THRESHOLD
     )
 
     if not tracker:
@@ -112,6 +126,15 @@ def main():
         lib.pointer_detector_release(pointer_detector)
         return -1
     print("Tracker initialization successful.")
+
+    # 输出路径与 test_video_pure_python.py 分开，避免两个脚本互相覆盖产物
+    out_video_path = "/home/diana/洛克导航/navigation_engine/test_output_ctypes.mp4"
+    writer = cv2.VideoWriter(out_video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (width, height))
+    if not writer.isOpened():
+        print("Error: Could not open VideoWriter for saving output.", file=sys.stderr)
+        lib.player_tracker_release(tracker)
+        lib.pointer_detector_release(pointer_detector)
+        return -1
 
     frame_idx = 0
     while True:
