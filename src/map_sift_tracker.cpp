@@ -1920,7 +1920,8 @@ bool player_tracker_locate(void* handle, const int32_t* frame_pixels, int w, int
         StepTiming timing;
         tracker->track_count_ += 1;
 
-        cv::Mat rgba(h, w, CV_8UC4, const_cast<int32_t*>(frame_pixels));
+        // frame_pixels 是 ARGB packed int32，小端内存序为 B,G,R,A。
+        cv::Mat bgra(h, w, CV_8UC4, const_cast<int32_t*>(frame_pixels));
         cv::Rect minimap_rect(tracker->minimap_left_, tracker->minimap_top_, tracker->minimap_width_, tracker->minimap_height_);
         
         if (minimap_rect.x < 0 || minimap_rect.y < 0 || 
@@ -1929,9 +1930,9 @@ bool player_tracker_locate(void* handle, const int32_t* frame_pixels, int w, int
             return false;
         }
 
-        cv::Mat mini_rgba = rgba(minimap_rect);
+        cv::Mat mini_bgra = bgra(minimap_rect);
         cv::Mat mini_bgr;
-        cv::cvtColor(mini_rgba, mini_bgr, cv::COLOR_RGBA2BGR);
+        cv::cvtColor(mini_bgra, mini_bgr, cv::COLOR_BGRA2BGR);
 
         TrackResult result = tracker->track_minimap(mini_bgr, timing);
         const auto end = std::chrono::steady_clock::now();

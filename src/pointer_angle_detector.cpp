@@ -1,6 +1,9 @@
 #include "pointer_angle_detector.h"
 #include <cmath>
 
+// 见 detect_patch()：模型无拒识头，confidence 只是占位常量。
+static constexpr float kNoRejectionConfidence = 1.0f;
+
 #ifdef __ANDROID__
 #include <android/log.h>
 #define DET_LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "luoke_det", __VA_ARGS__)
@@ -61,14 +64,19 @@ PointerDetectResult PointerAngleDetector::detect(const cv::Mat& frame_bgr) {
 }
 
 PointerDetectResult PointerAngleDetector::detect_patch(const cv::Mat& patch_bgr_32x32) {
-    if (!loaded_ || patch_bgr_32x32.empty() || patch_bgr_32x32.cols != 32 || patch_bgr_32x32.rows != 32) {
+    if (!loaded_ || patch_bgr_32x32.empty() || patch_bgr_32x32.cols != 32 || patch_bgr_32x32.rows != 32
+            || patch_bgr_32x32.type() != CV_8UC3) {
         return {false, 0.f, 0.f};
     }
 
     try {
-        // Convert to NCNN Mat (3 channels, 32x32)
-        ncnn::Mat in = ncnn::Mat::from_pixels(patch_bgr_32x32.data, ncnn::Mat::PIXEL_BGR, 32, 32);
-        
+        // Convert to NCNN Mat (3 channels, 32x32).
+        // detect() 传进来的 patch 是整帧的 ROI 视图，行间距等于整帧的 step（1280x720 帧为 3840 字节），
+        // 而不带 stride 的 from_pixels 会按 32*3=96 字节紧凑读取，只有第 0 行是对的。
+        // 必须显式传 patch 的真实 step。
+        ncnn::Mat in = ncnn::Mat::from_pixels(patch_bgr_32x32.data, ncnn::Mat::PIXEL_BGR, 32, 32,
+                                              static_cast<int>(patch_bgr_32x32.step));
+
         // Normalize BGR channels by dividing 255.0
         const float norm[3] = {1/255.f, 1/255.f, 1/255.f};
         in.substract_mean_normalize(nullptr, norm);
@@ -93,7 +101,10 @@ PointerDetectResult PointerAngleDetector::detect_patch(const cv::Mat& patch_bgr_
             angle_deg += 360.f;
         }
 
-        return {true, angle_deg, 1.0f};
+        // 该网络是纯角度回归、没有拒识头，输出向量已 L2 归一化（实测 |[s,c]| 恒为 1.0），
+        // 因此无法从中导出真实置信度。这里的 has_match 只表示"推理成功"，
+        // confidence 是占位常量，调用方不要把它当成概率使用。
+        return {true, angle_deg, kNoRejectionConfidence};
     } catch (...) {
         return {false, 0.f, 0.f};
     }

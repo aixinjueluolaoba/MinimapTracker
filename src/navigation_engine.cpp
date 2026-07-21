@@ -39,10 +39,11 @@ bool pointer_detector_detect(void* handle, const int32_t* frame_pixels, int w, i
     }
 
     try {
-        // Construct BGR cv::Mat from 32-bit RGBA pixel stream
-        cv::Mat rgba(h, w, CV_8UC4, const_cast<int32_t*>(frame_pixels));
+        // frame_pixels 是 ARGB packed int32（等同 Android Bitmap.getPixels）。
+        // 小端机器上其内存字节序为 B,G,R,A，因此这里必须按 BGRA 解释，不是 RGBA。
+        cv::Mat bgra(h, w, CV_8UC4, const_cast<int32_t*>(frame_pixels));
         cv::Mat bgr;
-        cv::cvtColor(rgba, bgr, cv::COLOR_RGBA2BGR);
+        cv::cvtColor(bgra, bgr, cv::COLOR_BGRA2BGR);
 
         PointerDetectResult res = detector->detect(bgr);
         
@@ -114,9 +115,10 @@ Java_com_example_myapplication_NativePointerDetector_nativeDetect(
     }
 
     try {
-        cv::Mat rgba(height, width, CV_8UC4, reinterpret_cast<void*>(raw_pixels));
+        // Java int[] 来自 Bitmap.getPixels()，是 ARGB packed int，小端内存序为 B,G,R,A。
+        cv::Mat bgra(height, width, CV_8UC4, reinterpret_cast<void*>(raw_pixels));
         cv::Mat bgr;
-        cv::cvtColor(rgba, bgr, cv::COLOR_RGBA2BGR);
+        cv::cvtColor(bgra, bgr, cv::COLOR_BGRA2BGR);
 
         PointerDetectResult res = g_pointer_detector->detect(bgr);
         raw[0] = res.has_match ? 1.f : 0.f;

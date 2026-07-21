@@ -2,6 +2,16 @@
 
 #include <cstdint>
 
+// ==========================================
+// 像素格式契约
+// ==========================================
+// 所有 `const int32_t* frame_pixels` 参数都是 **ARGB packed int32**，
+// 即每个 int 的布局为 (A<<24)|(R<<16)|(G<<8)|B —— 与 Android
+// Bitmap.getPixels(int[]) 和 test/test_video.py 的打包方式一致。
+// 注意：在小端机器上它的内存字节序是 B,G,R,A，所以内部按 BGRA 解释。
+// 若要传 AndroidBitmap_lockPixels 拿到的 RGBA_8888 原始缓冲区（内存序 R,G,B,A），
+// 请改用 MapSiftTracker 的 JNI 接口，不要走这里的 C API。
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -19,7 +29,9 @@ extern "C" {
 // 创建指针检测器实例（自动载入 NCNN 格式的模型 param 和 bin 权重）
 NAV_EXPORT void* pointer_detector_create(const char* model_dir);
 
-// 传入整帧的 32 位 RGBA 像素数据，解算出指针朝向角度 (0~359.9度)
+// 传入整帧的 ARGB packed 像素数据，解算出指针朝向角度 (0~359.9度)。
+// 注意：该模型是纯角度回归、没有拒识头，has_match 只表示"推理成功"，
+// confidence 是固定占位常量 1.0，不是概率，不要用它做阈值判断。
 NAV_EXPORT bool pointer_detector_detect(void* handle, const int32_t* frame_pixels, int w, int h,
                                         bool* has_match, float* angle_deg, float* confidence);
 
@@ -46,7 +58,8 @@ NAV_EXPORT void* player_tracker_create(const char* map_path,
                                     int min_match_count,
                                     double ransac_threshold);
 
-// 输入当前帧整幅图像的 32 位 RGBA 像素数据，解算出在大地图上的精确像素坐标 (out_x, out_y)
+// 输入当前帧整幅图像的 ARGB packed 像素数据，解算出在大地图上的精确像素坐标 (out_x, out_y)。
+// confidence 目前只是 found ? 1.0 : 0.0 的二值量，不是连续置信度。
 NAV_EXPORT bool player_tracker_locate(void* handle, const int32_t* frame_pixels, int w, int h,
                                     float* out_x, float* out_y, float* confidence, int* cost_ms);
 
