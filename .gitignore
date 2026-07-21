@@ -24,9 +24,15 @@ test_output.mp4
 *.avi
 *.mkv
 
+# 例外：README 展示用的演示视频（H.264，已压缩，随仓库分发）
+!docs/media/*.mp4
+
 # IDEs and editors
 .vscode/
 .idea/
 *.swp
 *.swo
 .DS_Store
+
+# 抽帧产物
+test_frames/
