@@ -92,6 +92,7 @@ add_library(fishing_native SHARED
     src/navigation_engine.cpp
     src/pointer_angle_detector.cpp
     src/map_sift_tracker.cpp
+    src/simple_navigation_api.cpp
 )
 
 # Set compile definitions for shared library
@@ -118,4 +119,11 @@ else()
         -fopenmp
         ${OpenCV_LIBS}
     )
+endif()
+
+option(NAV_BUILD_SMOKE_TEST "Build the native navigation engine smoke executable" OFF)
+if (NAV_BUILD_SMOKE_TEST)
+    add_executable(navigation_engine_smoke test/navigation_engine_smoke.cpp)
+    target_include_directories(navigation_engine_smoke PRIVATE src)
+    target_link_libraries(navigation_engine_smoke PRIVATE fishing_native)
 endif()

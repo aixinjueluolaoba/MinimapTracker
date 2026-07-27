@@ -159,35 +159,57 @@ NAV_EXPORT void  player_tracker_release(void* handle);
 
 `base_search_radius` 是**半径**，不是窗口边长。`confidence` 目前只是 `found ? 1.0 : 0.0` 的二值量。
 
+### 简化聚合接口（推荐）
+
+Python/FFI 调用方不需要分别管理两个 native handle，也不需要把 OpenCV 图像手动打包成
+ARGB。`navigation_engine_create()` 使用生产默认参数，模型根目录下只需保持
+`pointer_model/` 与 `superpoint_model/` 两个子目录：
+
+```c
+NAV_EXPORT void* navigation_engine_create(const char* model_root_dir,
+                                          const char* map_path,
+                                          const char* cache_path);
+NAV_EXPORT int navigation_engine_process_bgr(void* handle,
+                                             const uint8_t* frame_bgr,
+                                             int width, int height, int stride_bytes,
+                                             NavigationEngineResult* out_result);
+NAV_EXPORT const char* navigation_engine_last_error(void* handle);
+NAV_EXPORT void navigation_engine_release(void* handle);
+```
+
+`process_bgr()` 返回 1 表示调用成功；是否定位、是否得到角度分别读取结果中的
+`located` 和 `pointer_detected`。
+
 ---
 
 ## 🧪 测试
 
-### `test/test_video_pure_python.py` —— 纯 Python 参照实现
+### `test/test_video.py` —— Python ctypes 集成测试
 
-不依赖编译产物，用 `cv2` + `ncnn` 的 Python 绑定复现定位与测角流程，渲染出上面那段视频。
+Python 不保留独立算法实现，统一加载编译出的 `.so`，在无 JVM 依赖的条件下直接调用生产 C API。运行前需要先完成上面的 Linux PC 构建。
 
-```bash
-python3 test/test_video_pure_python.py [视频路径] [--no-play]
+业务代码推荐使用 `python/minimap_tracker.py` 的薄封装，它只负责 `ctypes` 和
+NumPy 参数转换，所有算法仍在 `.so` 内：
+
+```python
+from minimap_tracker import NavigationEngine
+
+with NavigationEngine("models", "/path/to/big_map.png", "build/sift_cache.bin") as engine:
+    result = engine.process(frame_bgr)
+    print(result.located, result.x, result.y, result.angle_deg)
 ```
 
-`--no-play` 跳过结尾的 mpv 播放，用于无人值守运行。大地图 SIFT 特征首次提取约 2.6 秒（139562 个特征），之后缓存在 `build/sift_cache_py.npz`。
+从源码目录直接运行自己的脚本时，将薄封装目录加入模块搜索路径：
 
-**与生产 C++ 的已知差异，不要当等价物**：
-
-* 本脚本**全程使用 SIFT**，局部模式只是缩小搜索范围，**没有 SuperPoint**，耗时数字不可与 C++ 对比。
-* C++ 的全局搜索有 2 秒节流，本脚本没有。
-* 没有移植 C++ 的 `smooth_position()`（EMA 平滑 + 跳变拒绝），输出的是原始解算坐标。
-
-### `test/test_video.py` —— ctypes 集成测试
-
-加载编译出的 `.so`，在无 JVM 依赖的条件下直接调 C API。这是**唯一能真正验证 C++ 实现**的手段，需要先完成上面的 Linux PC 构建。
+```bash
+PYTHONPATH=python python3 your_script.py
+```
 
 ```bash
 python3 test/test_video.py [视频路径]
 ```
 
-输出写到 `test_output_ctypes.mp4`（与纯 Python 版分开，避免互相覆盖）。
+输出写到 `test_output_ctypes.mp4`。
 
 ---
 

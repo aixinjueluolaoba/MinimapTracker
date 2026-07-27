@@ -66,6 +66,44 @@ NAV_EXPORT bool player_tracker_locate(void* handle, const int32_t* frame_pixels,
 // 释放定位器实例，回收堆内存
 NAV_EXPORT void player_tracker_release(void* handle);
 
+// ==========================================
+// 3. Simple Navigation Engine API (推荐给 Python / FFI 调用方)
+// ==========================================
+
+// 单帧聚合结果。located 和 pointer_detected 分别表示本帧是否得到定位与角度；
+// navigation_engine_process_bgr() 返回 1 只表示调用成功，不保证两项均命中。
+typedef struct NavigationEngineResult {
+    int32_t located;
+    float x;
+    float y;
+    int32_t locate_cost_ms;
+    int32_t pointer_detected;
+    float angle_deg;
+} NavigationEngineResult;
+
+// 使用生产默认参数一次性创建指针检测器和地图定位器。
+// model_root_dir 下必须包含 pointer_model/ 和 superpoint_model/。
+// cache_path 可传 NULL 或空字符串，此时不读写 SIFT 特征缓存。
+NAV_EXPORT void* navigation_engine_create(const char* model_root_dir,
+                                          const char* map_path,
+                                          const char* cache_path);
+
+// 直接接收 OpenCV 常用的 uint8 BGR 图像，允许每行带 padding。
+// stride_bytes 必须不小于 width * 3。
+NAV_EXPORT int navigation_engine_process_bgr(void* handle,
+                                             const uint8_t* frame_bgr,
+                                             int width,
+                                             int height,
+                                             int stride_bytes,
+                                             NavigationEngineResult* out_result);
+
+// 返回当前实例最近一次错误；创建失败时可传 NULL 获取本线程的创建错误。
+// 返回指针由库持有，只保证在下一次 API 调用前有效。
+NAV_EXPORT const char* navigation_engine_last_error(void* handle);
+
+// 允许传 NULL。
+NAV_EXPORT void navigation_engine_release(void* handle);
+
 #ifdef __cplusplus
 }
 #endif
